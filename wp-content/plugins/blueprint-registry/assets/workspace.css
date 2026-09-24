@@ -1,0 +1,403 @@
+/**
+ * Contributor workspace: the work list, the Blueprint editor, and the
+ * pre-submit comparison.
+ */
+
+/* ------------------------------------------------------------- segments -- */
+
+/* Status tabs over the work list. */
+.bp-segments {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: .25rem;
+	margin-bottom: 1rem;
+	padding: .25rem;
+	border: 1px solid var(--bp-line);
+	border-radius: var(--bp-radius);
+	background: var(--bp-surface);
+}
+
+.bp-segments a {
+	display: inline-flex;
+	align-items: center;
+	gap: .4375rem;
+	height: 2rem;
+	padding: 0 .75rem;
+	border-radius: var(--bp-radius-sm);
+	color: var(--bp-ink-2);
+	font-size: .8125rem;
+	font-weight: 550;
+	text-decoration: none;
+	white-space: nowrap;
+}
+
+.bp-segments a:hover {
+	background: var(--bp-surface-sunken);
+	color: var(--bp-ink);
+}
+
+.bp-segments a[aria-current="page"] {
+	background: var(--bp-ink);
+	color: var(--bp-surface);
+}
+
+.bp-segments__count {
+	padding: 0 .375rem;
+	border-radius: var(--bp-radius-pill);
+	background: var(--bp-surface-sunken);
+	color: var(--bp-ink-3);
+	font-size: .6875rem;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+
+.bp-segments a[aria-current="page"] .bp-segments__count {
+	background: rgb(255 255 255 / 20%);
+	color: inherit;
+}
+
+.bp-segments a.is-attention .bp-segments__count {
+	background: var(--bp-danger-soft);
+	color: var(--bp-danger);
+}
+
+/* --------------------------------------------------------------- editor -- */
+
+/* Two columns: the bundle's files, then whatever edits them. The right column
+   is a single slot so the Playground bundle editor can replace its contents. */
+.bp-editor {
+	display: grid;
+	gap: 1.25rem;
+	align-items: start;
+	grid-template-columns: 17rem minmax(0, 1fr);
+}
+
+.bp-editor__aside {
+	position: sticky;
+	top: calc(var(--bp-header-height) + 1rem);
+	display: grid;
+	gap: 1.25rem;
+}
+
+.admin-bar .bp-editor__aside {
+	top: calc(var(--bp-header-height) + 3rem);
+}
+
+.bp-editor__slot {
+	min-width: 0;
+}
+
+.bp-field {
+	display: block;
+	margin-bottom: 1rem;
+}
+
+.bp-field:last-child {
+	margin-bottom: 0;
+}
+
+.bp-field__label {
+	display: block;
+	margin-bottom: .375rem;
+	color: var(--bp-ink-2);
+	font-size: .8125rem;
+	font-weight: 600;
+}
+
+.bp-field__hint {
+	margin: .375rem 0 0;
+	color: var(--bp-ink-3);
+	font-size: .75rem;
+	line-height: 1.5;
+}
+
+.bp-input {
+	display: block;
+	box-sizing: border-box;
+	width: 100%;
+	padding: .5rem .625rem;
+	border: 1px solid var(--bp-line-strong);
+	border-radius: var(--bp-radius-sm);
+	background: var(--bp-surface);
+	color: var(--bp-ink);
+	font: inherit;
+	font-size: .875rem;
+}
+
+.bp-input:focus {
+	border-color: var(--bp-accent);
+	box-shadow: var(--bp-ring);
+	outline: 0;
+}
+
+.bp-input[type="file"] {
+	padding: .375rem;
+	font-size: .8125rem;
+}
+
+.bp-input[disabled] {
+	background: var(--bp-surface-sunken);
+	color: var(--bp-ink-3);
+}
+
+textarea.bp-input {
+	min-height: 26rem;
+	font-family: var(--bp-font-mono);
+	font-size: .8125rem;
+	line-height: 1.6;
+	resize: vertical;
+	tab-size: 2;
+}
+
+/* The core code editor replaces the textarea in place. */
+.bp-editor__slot .CodeMirror {
+	height: auto;
+	min-height: 30rem;
+	max-height: 46rem;
+	font-family: var(--bp-font-mono);
+	font-size: .8125rem;
+	line-height: 1.6;
+}
+
+.bp-editor__slot .CodeMirror-scroll {
+	min-height: 30rem;
+}
+
+/* Bundle file list in the editor sidebar. */
+.bp-bundle-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.bp-bundle-list li {
+	display: flex;
+	align-items: center;
+	gap: .5rem;
+	padding: .5rem .75rem;
+	border-bottom: 1px solid var(--bp-line);
+}
+
+.bp-bundle-list li:last-child {
+	border-bottom: 0;
+}
+
+.bp-bundle-list__name {
+	overflow: hidden;
+	flex: 1;
+	min-width: 0;
+	color: var(--bp-ink);
+	font-family: var(--bp-font-mono);
+	font-size: .75rem;
+	text-decoration: none;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.bp-bundle-list__name:hover {
+	color: var(--bp-accent);
+}
+
+.bp-bundle-list svg {
+	width: 15px;
+	height: 15px;
+	flex: none;
+	color: var(--bp-ink-3);
+}
+
+.bp-bundle-list__size {
+	flex: none;
+	color: var(--bp-ink-3);
+	font-family: var(--bp-font-mono);
+	font-size: .6875rem;
+	white-space: nowrap;
+}
+
+.bp-bundle-list__note {
+	margin: 0;
+	padding: .625rem .75rem;
+	border-top: 1px solid var(--bp-line);
+	color: var(--bp-ink-3);
+	font-size: .75rem;
+	line-height: 1.5;
+}
+
+.bp-bundle-list__remove {
+	display: inline-grid;
+	width: 1.5rem;
+	height: 1.5rem;
+	flex: none;
+	border: 0;
+	border-radius: var(--bp-radius-sm);
+	background: transparent;
+	color: var(--bp-ink-3);
+	cursor: pointer;
+	place-items: center;
+}
+
+.bp-bundle-list__remove:hover {
+	background: var(--bp-danger-soft);
+	color: var(--bp-danger);
+}
+
+/* ----------------------------------------------------- review timeline -- */
+
+.bp-thread {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.bp-thread li {
+	display: flex;
+	gap: .75rem;
+	padding: .875rem 1.125rem;
+	border-bottom: 1px solid var(--bp-line);
+}
+
+.bp-thread li:last-child {
+	border-bottom: 0;
+}
+
+.bp-thread__icon {
+	display: grid;
+	width: 1.75rem;
+	height: 1.75rem;
+	flex: none;
+	border-radius: var(--bp-radius-pill);
+	place-items: center;
+}
+
+.bp-thread__icon svg {
+	width: 15px;
+	height: 15px;
+}
+
+.bp-thread__icon--approved {
+	background: var(--bp-ok-soft);
+	color: var(--bp-ok);
+}
+
+.bp-thread__icon--changes_requested,
+.bp-thread__icon--rejected {
+	background: var(--bp-danger-soft);
+	color: var(--bp-danger);
+}
+
+.bp-thread__body {
+	min-width: 0;
+	flex: 1;
+}
+
+.bp-thread__head {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: .375rem;
+	color: var(--bp-ink-3);
+	font-size: .8125rem;
+}
+
+.bp-thread__head strong {
+	color: var(--bp-ink);
+	font-weight: 600;
+}
+
+.bp-thread__message {
+	margin: .375rem 0 0;
+	color: var(--bp-ink-2);
+	font-size: .875rem;
+	line-height: 1.6;
+	white-space: pre-wrap;
+}
+
+@media (max-width: 960px) {
+	.bp-editor {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.bp-editor__aside {
+		position: static;
+	}
+}
+
+@media (max-width: 782px) {
+	.bp-page-head__actions {
+		flex-wrap: wrap;
+	}
+}
+
+/* Optional details stay close to the work without displacing the editor. */
+.bp-upload-options summary {
+	color: var(--bp-ink-2);
+	font-size: .8125rem;
+	cursor: pointer;
+}
+
+.bp-upload-options[open] summary {
+	margin-bottom: .75rem;
+}
+
+.bp-feedback,
+.bp-review-intro {
+	margin-bottom: 1.25rem;
+}
+
+.bp-review-intro h2 {
+	margin: 0;
+	font-size: 1.125rem;
+}
+
+.bp-review-intro p {
+	margin: .5rem 0 0;
+}
+
+.bp-submitted-history {
+	margin-top: 1.25rem;
+}
+
+.bp-history-toggle {
+	padding: .875rem 1.125rem;
+	color: var(--bp-ink-2);
+	font-size: .875rem;
+	cursor: pointer;
+}
+
+.bp-submitted-version {
+	border-top: 1px solid var(--bp-line);
+}
+
+.bp-submitted-version > .bp-panel {
+	margin: 0 1rem 1rem;
+}
+
+.bp-bundle-list a.bp-bundle-list__remove:hover {
+	background: var(--bp-surface-sunken);
+	color: var(--bp-accent);
+}
+
+@media (max-width: 960px) {
+	.bp-editor__slot {
+		grid-row: 1;
+	}
+}
+
+@media (max-width: 782px) {
+	.bp-editor__slot .bp-panel__head {
+		flex-wrap: wrap;
+		gap: .375rem;
+	}
+
+	.bp-editor__slot .bp-panel__head h2 {
+		flex: none;
+	}
+
+	.bp-editor__slot [data-bp-save-state] {
+		flex-basis: 100%;
+	}
+}
+
+.bp-bundle-list button.bp-bundle-list__remove svg {
+	color: var(--bp-danger);
+}

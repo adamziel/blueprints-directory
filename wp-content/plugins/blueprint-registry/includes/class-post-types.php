@@ -46,8 +46,8 @@ final class Blueprint_Registry_Post_Types {
 			'blueprint_release',
 			array(
 				'labels'              => array(
-					'name'          => __( 'Blueprint releases', 'blueprint-registry' ),
-					'singular_name' => __( 'Blueprint release', 'blueprint-registry' ),
+					'name'          => __( 'Blueprint revisions', 'blueprint-registry' ),
+					'singular_name' => __( 'Blueprint revision', 'blueprint-registry' ),
 				),
 				'public'              => false,
 				'show_ui'             => true,

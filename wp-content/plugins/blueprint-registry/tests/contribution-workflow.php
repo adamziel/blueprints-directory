@@ -16,25 +16,14 @@ $assert = static function ( $condition, $message ) {
 	}
 };
 
-$attachment = static function ( $name, $contents, $parent_id ) use ( &$created_attachments ) {
-	$upload = wp_upload_bits( $name, null, $contents );
-	if ( ! empty( $upload['error'] ) ) {
-		throw new RuntimeException( $upload['error'] );
+// Bundle files live in private storage now; write contents straight in.
+$add_file = static function ( $change_id, $path, $contents ) {
+	$record = Blueprint_Registry_Bundles::add_change_file( $change_id, $contents, $path );
+	if ( is_wp_error( $record ) ) {
+		throw new RuntimeException( $record->get_error_message() );
 	}
-	$id = wp_insert_attachment(
-		array(
-			'post_title'     => $name,
-			'post_mime_type' => wp_check_filetype( $name )['type'],
-			'post_status'    => 'inherit',
-		),
-		$upload['file'],
-		$parent_id
-	);
-	if ( is_wp_error( $id ) ) {
-		throw new RuntimeException( $id->get_error_message() );
-	}
-	$created_attachments[] = (int) $id;
-	return (int) $id;
+
+	return $record;
 };
 
 try {
@@ -59,10 +48,17 @@ try {
 	ob_start();
 	$render_dashboard->invoke( null );
 	$dashboard = ob_get_clean();
-	$assert( 1 === substr_count( $dashboard, '>+ New Blueprint<' ) && ! str_contains( $dashboard, 'bp_new_title' ), 'The dashboard must show one New Blueprint button with no title field.' );
-	$assert( str_contains( $dashboard, 'bp-gallery__grid bp-manage__grid' ) && str_contains( $dashboard, 'bp-manage__tile' ) && str_contains( $dashboard, 'bp-tile__placeholder' ), 'The dashboard must use the gallery cards and show a placeholder when a draft has no thumbnail.' );
+	$assert( 1 === substr_count( $dashboard, esc_url( Blueprint_Registry_Frontend::new_editor_url() ) ) && ! str_contains( $dashboard, 'bp_new_title' ), 'The dashboard must offer one route to a new Blueprint, with no title field.' );
+	$assert( str_contains( $dashboard, 'bpv__table' ) && str_contains( $dashboard, 'bpv__thumb-letter' ), 'The dashboard must list work in a table and fall back to a letter when a draft has no thumbnail.' );
+	$assert( str_contains( $dashboard, 'bp-segments' ), 'The dashboard must let a contributor filter by status.' );
 	$assert( ! str_contains( $dashboard, '>Preview<' ), 'The dashboard cards must have one edit action instead of a separate preview action.' );
-	$assert( strpos( $dashboard, '>Remove<' ) < strpos( $dashboard, '>Edit &rarr;</a>' ), 'A draft card must put Remove before Edit.' );
+	$assert( strpos( $dashboard, 'bp-btn--quiet-danger' ) < strpos( $dashboard, 'Continue' ), 'A draft row must put Remove before the action that continues it.' );
+	$add_file( $untitled_change, 'readme.html', '<script>alert("no");</script>' );
+	ob_start();
+	Blueprint_Registry_Diff::render_change( $untitled_change );
+	$new_contents = ob_get_clean();
+	$assert( str_contains( $new_contents, 'blueprint.json' ) && str_contains( $new_contents, 'Untitled Blueprint' ), 'New Blueprint review must show its JSON, not an empty comparison.' );
+	$assert( str_contains( $new_contents, '&lt;script&gt;' ) && ! str_contains( $new_contents, '<script>' ), 'Bundled markup must be readable without executing it.' );
 	$changes_before_new_editor = get_posts(
 		array(
 			'post_type'      => 'blueprint_change',
@@ -88,6 +84,12 @@ try {
 	$wp_query->query_vars = $previous_query_vars;
 	$wp_query             = $previous_wp_query;
 	$assert( str_contains( $new_editor, 'Review changes' ) && $changes_before_new_editor === get_posts( array( 'post_type' => 'blueprint_change', 'post_status' => 'draft', 'author' => $author_id, 'posts_per_page' => -1, 'fields' => 'ids' ) ), 'Opening the new editor must not create a draft.' );
+	$assert(
+		str_contains( $new_editor, 'data-bp-bundle-source' )
+		&& str_contains( $new_editor, 'data-bp-bundle-archive' )
+		&& ! str_contains( $new_editor, 'name="bp_bundle_source"' ),
+		'The editor must submit only its browser-created ZIP, never the selected raw files.'
+	);
 
 	$previous_post    = $_POST;
 	$previous_request = $_REQUEST;
@@ -181,8 +183,7 @@ try {
 	);
 	$assert( ! is_wp_error( $source_change ), 'The first proposal must be created.' );
 	$created_posts[] = $source_change;
-	$base_file = $attachment( 'first.txt', "first version  \n", $source_change );
-	$assert( true === Blueprint_Registry_Bundles::add_change_file( $source_change, $base_file, 'content/first.txt' ), 'The first bundle file must be added.' );
+	$assert( ! is_wp_error( $add_file( $source_change, 'content/first.txt', "first version  \n" ) ), 'The first bundle file must be added.' );
 	Blueprint_Registry_Workflow::set_source(
 		$source_change,
 		wp_json_encode(
@@ -212,7 +213,7 @@ try {
 	ob_start();
 	$render_dashboard->invoke( null );
 	$dashboard = ob_get_clean();
-	$assert( str_contains( $dashboard, 'bp-manage__status--published' ) && ! str_contains( $dashboard, 'bp-manage__status--accepted' ), 'A Blueprint with no active proposal must be shown as published, not as an accepted proposal.' );
+	$assert( str_contains( $dashboard, 'bp-chip--published' ) && ! str_contains( $dashboard, 'bp-chip--accepted' ), 'A Blueprint with no active proposal must be shown as published, not as an accepted proposal.' );
 	$update = Blueprint_Registry_Workflow::create_change(
 		array(
 			'title'     => get_the_title( $blueprint_id ),
@@ -225,11 +226,10 @@ try {
 	$created_posts[] = $update;
 	$copied_files = Blueprint_Registry_Bundles::get_change_files( $update );
 	$assert( 1 === count( $copied_files ), 'The update must start with the previous bundle file.' );
-	$copied_file_id = (int) $copied_files[0]['attachment_id'];
-	$created_attachments[] = $copied_file_id;
-	file_put_contents( get_attached_file( $copied_file_id ), "first version \n" );
-	$added_file = $attachment( 'second.txt', "new file\n", $update );
-	$assert( true === Blueprint_Registry_Bundles::add_change_file( $update, $added_file, 'content/second.txt' ), 'A new bundle file must be added to the update.' );
+	// Replace the inherited file's contents, the way the editor does.
+	Blueprint_Registry_Bundles::remove_change_file( $update, $copied_files[0]['key'] );
+	$assert( ! is_wp_error( $add_file( $update, 'content/first.txt', "first version \n" ) ), 'The inherited bundle file must be replaceable.' );
+	$assert( ! is_wp_error( $add_file( $update, 'content/second.txt', "new file\n" ) ), 'A new bundle file must be added to the update.' );
 	Blueprint_Registry_Workflow::set_source(
 		$update,
 		wp_json_encode(
@@ -262,28 +262,43 @@ try {
 	$assert( ! is_wp_error( $older_update ), 'A second draft for the same Blueprint must be created for the dashboard history check.' );
 	$created_posts[] = $older_update;
 	foreach ( Blueprint_Registry_Bundles::get_change_files( $older_update ) as $file_entry ) {
-		$created_attachments[] = (int) $file_entry['attachment_id'];
 	}
 	ob_start();
 	$render_dashboard->invoke( null );
 	$dashboard = ob_get_clean();
 	$assert( 1 === substr_count( $dashboard, 'data-bp-blueprint-id="' . $blueprint_id . '"' ), 'The dashboard must show one card for a published Blueprint, even when it has several proposals.' );
 	$assert( str_contains( $dashboard, Blueprint_Registry_Frontend::edit_url( $older_update ) ), 'The dashboard must link a Blueprint card to its most recent active proposal.' );
+	// Forking inherits the current revision's files; the editor must show them
+	// rather than promise them.
+	$render_new_editor = new ReflectionMethod( Blueprint_Registry_Frontend::class, 'render_new_editor' );
+	$render_new_editor->setAccessible( true );
+	$previous_query_vars = array( get_query_var( 'bp_source_blueprint_id' ), get_query_var( 'bp_new_mode' ) );
+	set_query_var( 'bp_source_blueprint_id', $blueprint_id );
+	set_query_var( 'bp_new_mode', 'fork' );
+	ob_start();
+	$render_new_editor->invoke( null );
+	$fork_editor = ob_get_clean();
+	set_query_var( 'bp_source_blueprint_id', $previous_query_vars[0] );
+	set_query_var( 'bp_new_mode', $previous_query_vars[1] );
+	$assert( str_contains( $fork_editor, 'content/first.txt' ), 'The fork editor must list the bundle files it inherits.' );
+	$assert( str_contains( $fork_editor, 'Included from revision' ), 'The fork editor must say where the inherited files come from.' );
+
 	$render_editor = new ReflectionMethod( Blueprint_Registry_Frontend::class, 'render_editor' );
 	$render_editor->setAccessible( true );
 	ob_start();
 	$render_editor->invoke( null, $update );
 	$editor = ob_get_clean();
-	$assert( str_contains( $editor, 'Review changes' ) && ! str_contains( $editor, 'Save changes' ) && ! str_contains( $editor, '>Preview<' ), 'The editable proposal screen must offer Review changes without duplicate save or preview actions.' );
-	$assert( strpos( $editor, 'bp-manage__button--danger' ) < strpos( $editor, '>Review changes<' ), 'A draft editor must put the red Remove action before Review changes.' );
-	$assert( str_contains( $editor, 'Revision history' ) && str_contains( $editor, Blueprint_Registry_Routes::release_detail_url( $blueprint_id, 1 ) ) && str_contains( $editor, Blueprint_Registry_Frontend::edit_url( $older_update ) ), 'The editor must provide access to the published release and earlier proposals.' );
+	$assert( 1 === substr_count( $editor, 'name="bp_action" value="save_and_review"' ) && ! str_contains( $editor, 'name="bp_action" value="save"' ), 'The editor must have one review action, with no competing save field.' );
+	$assert( str_contains( $editor, 'Review changes' ) && ! str_contains( $editor, 'Save draft' ) && ! str_contains( $editor, '>Preview<' ), 'The editable proposal screen must offer Review changes without duplicate save or preview actions.' );
+	$assert( strpos( $editor, 'bp-btn--quiet-danger' ) < strpos( $editor, 'Review changes' ), 'A draft editor must put the destructive Remove action before Review changes.' );
+	$assert( str_contains( $editor, Blueprint_Registry_Routes::release_detail_url( $blueprint_id, 1 ) ) && str_contains( $editor, Blueprint_Registry_Frontend::edit_url( $older_update ) ), 'The editor must provide access to the published release and earlier proposals.' );
 	$assert( str_contains( $editor, 'action=bp_bundle_file' ) && str_contains( $editor, 'download=1' ), 'Contributor bundle files must have open and download links.' );
 	$render_submission_review = new ReflectionMethod( Blueprint_Registry_Frontend::class, 'render_submission_review' );
 	$render_submission_review->setAccessible( true );
 	ob_start();
 	$render_submission_review->invoke( null, $update );
 	$submission_review = ob_get_clean();
-	$assert( strpos( $submission_review, 'bp-manage__button--danger' ) < strpos( $submission_review, '>Back to editing<' ), 'The review step must put Remove before its other actions.' );
+	$assert( ! str_contains( $submission_review, 'delete_draft' ) && str_contains( $submission_review, 'bp_reviewed_content' ), 'The review step must confirm specific contents without competing draft actions.' );
 	$diff = Blueprint_Registry_Bundles::diff_release_to_change( $release_one, $update );
 	$diff_by_path = array_column( $diff, null, 'path' );
 	$assert( 'changed' === $diff_by_path['blueprint.json']['status'], 'The Blueprint JSON diff must identify a changed declaration.' );
@@ -294,10 +309,12 @@ try {
 	ob_start();
 	Blueprint_Registry_Diff::render_change( $update, __( 'Changes from the base release', 'blueprint-registry' ) );
 	$rendered_diff = ob_get_clean();
-	$assert( str_contains( $rendered_diff, 'Bundle files') && str_contains( $rendered_diff, 'content/second.txt' ), 'The shared reviewer diff must show bundle-file changes.' );
+	$assert( str_contains( $rendered_diff, 'content/second.txt' ) && str_contains( $rendered_diff, 'content/first.txt' ), 'The shared reviewer diff must show bundle-file changes.' );
+	$assert( str_contains( $rendered_diff, 'bp-diff__badge--added' ) && str_contains( $rendered_diff, 'bp-diff__badge--changed' ), 'The shared reviewer diff must label each file as added or changed.' );
+	$assert( str_contains( $rendered_diff, 'files changed' ), 'The shared reviewer diff must summarise how much moved.' );
 	$assert( str_contains( $rendered_diff, 'diff-deletedline' ) && str_contains( $rendered_diff, 'diff-addedline' ), 'The shared reviewer diff must show actual removed and added lines.' );
 	$assert( 3 <= substr_count( $rendered_diff, '·' ), 'The shared reviewer diff must make trailing spaces visible.' );
-	$assert( str_contains( $rendered_diff, 'Show text diff: content/first.txt' ), 'The shared reviewer diff must include a readable text diff for changed text files.' );
+	$assert( 2 <= substr_count( $rendered_diff, "class='diff'" ), 'The shared reviewer diff must include a readable text diff for changed text files as well as the declaration.' );
 	$assert( str_contains( $rendered_diff, 'action=bp_bundle_file' ) && str_contains( $rendered_diff, 'download=1' ), 'Changed bundle files in the review step must have open and download links.' );
 
 	$entries = Blueprint_Registry_Bundles::release_file_entries( $release_one );
@@ -330,7 +347,6 @@ try {
 	$assert( ! is_wp_error( $stale ), 'A later update proposal must be created.' );
 	$created_posts[] = $stale;
 	foreach ( Blueprint_Registry_Bundles::get_change_files( $stale ) as $file_entry ) {
-		$created_attachments[] = (int) $file_entry['attachment_id'];
 	}
 	$stale_base = (int) get_post_meta( $stale, '_bp_base_release_id', true );
 
@@ -345,7 +361,6 @@ try {
 	$assert( ! is_wp_error( $parallel ), 'A parallel proposal must be created.' );
 	$created_posts[] = $parallel;
 	foreach ( Blueprint_Registry_Bundles::get_change_files( $parallel ) as $file_entry ) {
-		$created_attachments[] = (int) $file_entry['attachment_id'];
 	}
 	$assert( true === Blueprint_Registry_Workflow::submit( $parallel, $author_id ), 'The parallel update must submit.' );
 	wp_set_current_user( 1 );
@@ -383,7 +398,6 @@ try {
 	$assert( 0 === (int) get_post_meta( $fork, '_bp_target_blueprint_id', true ) && $blueprint_id === (int) get_post_meta( $fork, '_bp_source_blueprint_id', true ), 'A fork must be an independent proposal that records its source Blueprint.' );
 	$assert( $author_id === (int) get_post_field( 'post_author', $fork ), 'A fork proposal must belong to the contributor who made it.' );
 	foreach ( Blueprint_Registry_Bundles::get_change_files( $fork ) as $file_entry ) {
-		$created_attachments[] = (int) $file_entry['attachment_id'];
 	}
 
 	do_action( 'rest_api_init' );
@@ -392,6 +406,16 @@ try {
 	$data = $response->get_data();
 	$assert( 200 === $response->get_status() && 3 === count( $data['releases'] ), 'The public API must list every immutable release.' );
 	$assert( isset( $data['releases'][0]['files'] ) && in_array( 'content/first.txt', wp_list_pluck( $data['releases'][0]['files'], 'path' ), true ), 'The public API must expose files for browsing.' );
+
+	$removed_file_change = Blueprint_Registry_Workflow::create_change( array( 'author_id' => $author_id, 'target_id' => $blueprint_id, 'change_type' => 'update' ) );
+	$created_posts[] = $removed_file_change;
+	foreach ( Blueprint_Registry_Bundles::get_change_files( $removed_file_change ) as $file ) {
+		Blueprint_Registry_Bundles::remove_change_file( $removed_file_change, $file['key'] );
+	}
+	$removed_pair = Blueprint_Registry_Bundles::text_file_pair( $release_one, $removed_file_change, 'content/first.txt' );
+	$assert( is_array( $removed_pair ) && "first version  \n" === $removed_pair['base'] && '' === $removed_pair['proposal'], 'A removed text file must keep its old contents for the diff.' );
+	$added_pair = Blueprint_Registry_Bundles::text_file_pair( $release_one, $update, 'content/second.txt' );
+	$assert( is_array( $added_pair ) && '' === $added_pair['base'] && "new file\n" === $added_pair['proposal'], 'An added text file must show its complete new contents in the diff.' );
 
 	fwrite( STDOUT, "PASS contribution workflow: proposal comparison, feedback, rebasing, history, files, and forks.\n" );
 } catch ( Throwable $error ) {
@@ -413,7 +437,6 @@ try {
 		);
 		foreach ( $submissions as $submission ) {
 			foreach ( Blueprint_Registry_Bundles::get_submission_files( $submission->ID ) as $file ) {
-				$created_attachments[] = (int) $file['attachment_id'];
 			}
 			$submission_posts[] = $submission->ID;
 		}

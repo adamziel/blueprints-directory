@@ -19,25 +19,15 @@ $assert = static function ( $condition, $message ) {
 	}
 };
 
-$attachment = static function ( $name, $contents, $parent_id ) use ( &$created_attachments ) {
-	$upload = wp_upload_bits( $name, null, $contents );
-	if ( ! empty( $upload['error'] ) ) {
-		throw new RuntimeException( $upload['error'] );
+// Most workflow fixtures write straight into private storage. The archive case
+// below separately covers the browser-created ZIP upload path.
+$add_file = static function ( $change_id, $path, $contents ) {
+	$record = Blueprint_Registry_Bundles::add_change_file( $change_id, $contents, $path );
+	if ( is_wp_error( $record ) ) {
+		throw new RuntimeException( $record->get_error_message() );
 	}
-	$id = wp_insert_attachment(
-		array(
-			'post_title'     => $name,
-			'post_mime_type' => 'application/xml',
-			'post_status'    => 'inherit',
-		),
-		$upload['file'],
-		$parent_id
-	);
-	if ( is_wp_error( $id ) ) {
-		throw new RuntimeException( $id->get_error_message() );
-	}
-	$created_attachments[] = (int) $id;
-	return (int) $id;
+
+	return $record;
 };
 
 try {
@@ -76,8 +66,7 @@ try {
 		)
 	);
 	$created_posts[] = $change_id;
-	$asset_id        = $attachment( 'demo.txt', 'Blueprint test resource', $change_id );
-	$xml_asset_id    = $attachment( 'demo.xml', '<wxr />', $change_id );
+
 	$source_title    = 'Registry JSON title ' . wp_generate_password( 8, false );
 	$source_description = 'This gallery description comes from Blueprint JSON.';
 	$source          = wp_json_encode(
@@ -107,8 +96,64 @@ try {
 	Blueprint_Registry_Workflow::set_source( $change_id, $escaped_source );
 	$assert( $escaped_source === Blueprint_Registry_Workflow::source( $change_id ), 'Blueprint JSON containing escaped PHP namespaces must survive saving unchanged.' );
 	Blueprint_Registry_Workflow::set_source( $change_id, $source );
-	$assert( true === Blueprint_Registry_Bundles::add_change_file( $change_id, $asset_id, 'content/demo.txt' ), 'A valid asset must be added to the draft.' );
-	$assert( true === Blueprint_Registry_Bundles::add_change_file( $change_id, $xml_asset_id, 'content/demo.xml' ), 'A valid XML asset must be added to the draft.' );
+	$archive_path = wp_tempnam( 'blueprint-browser-bundle.zip' );
+	$archive      = new ZipArchive();
+	$assert( true === $archive->open( $archive_path, ZipArchive::CREATE | ZipArchive::OVERWRITE ), 'The browser fixture must create a ZIP.' );
+	$archive->addFromString( 'content/demo.txt', 'Blueprint test resource' );
+	$archive->addFromString( 'content/demo.xml', '<wxr />' );
+	// These extensions are accepted because the browser sends one normal ZIP,
+	// not because WordPress receives them as individual uploads.
+	$archive->addFromString( 'database.sql', "INSERT INTO t VALUES (1);\n" );
+	$archive->addFromString( 'ensure-media.php', "<?php echo 'hi';\n" );
+	$archive->close();
+	$imported = Blueprint_Registry_Bundles::import_change_archive( $change_id, $archive_path );
+	@unlink( $archive_path );
+	$assert( ! is_wp_error( $imported ) && 4 === count( $imported ), 'A browser-created ZIP must import every bundled file.' );
+	$php_file = Blueprint_Registry_Storage::find( Blueprint_Registry_Bundles::get_change_files( $change_id ), 'ensure-media.php' );
+	$assert(
+		is_array( $php_file ) && is_readable( Blueprint_Registry_Storage::file_path( $change_id, $php_file['key'] ) ),
+		'An arbitrary bundle file must be stored in the private proposal directory.'
+	);
+	$first_php_path = Blueprint_Registry_Storage::file_path( $change_id, $php_file['key'] );
+	$replacement_archive_path = wp_tempnam( 'blueprint-browser-replacement.zip' );
+	$replacement_archive      = new ZipArchive();
+	$assert( true === $replacement_archive->open( $replacement_archive_path, ZipArchive::CREATE | ZipArchive::OVERWRITE ), 'The replacement fixture must create a ZIP.' );
+	$replacement_archive->addFromString( 'ensure-media.php', "<?php echo 'updated';\n" );
+	$replacement_archive->close();
+	$replacement = Blueprint_Registry_Bundles::import_change_archive( $change_id, $replacement_archive_path );
+	@unlink( $replacement_archive_path );
+	$updated_php_file = Blueprint_Registry_Storage::find( Blueprint_Registry_Bundles::get_change_files( $change_id ), 'ensure-media.php' );
+	$assert(
+		! is_wp_error( $replacement )
+		&& 1 === count( $replacement )
+		&& 4 === count( Blueprint_Registry_Bundles::get_change_files( $change_id ) )
+		&& ! file_exists( $first_php_path )
+		&& "<?php echo 'updated';\n" === Blueprint_Registry_Storage::read( $change_id, $updated_php_file ),
+		'A later ZIP must replace matching paths without leaving the earlier file behind.'
+	);
+	$assert(
+		empty(
+			get_children(
+				array(
+					'post_parent' => $change_id,
+					'post_type'   => 'attachment',
+					'post_status' => 'any',
+					'fields'      => 'ids',
+				)
+			)
+		),
+		'Extracted bundle files must not create Media Library attachments.'
+	);
+	$cleanup_change = Blueprint_Registry_Workflow::create_change(
+		array(
+			'title'     => 'Registry storage cleanup ' . wp_generate_password( 8, false ),
+			'author_id' => 1,
+		)
+	);
+	$cleanup_file = $add_file( $cleanup_change, 'cleanup.php', "<?php echo 'cleanup';\n" );
+	$cleanup_path = Blueprint_Registry_Storage::file_path( $cleanup_change, $cleanup_file['key'] );
+	wp_delete_post( $cleanup_change, true );
+	$assert( ! file_exists( $cleanup_path ), 'Deleting a proposal must remove its private files.' );
 	$assert( array() === Blueprint_Registry_Validator::validate_change( $change_id ), 'A complete change must validate.' );
 	$preview_token = Blueprint_Registry_Bundles::build_preview( $change_id );
 	$assert( ! is_wp_error( $preview_token ), 'A valid draft must create a short-lived preview bundle.' );
@@ -136,6 +181,8 @@ try {
 	$assert( false !== $zip->locateName( 'blueprint.json' ), 'The bundle must contain blueprint.json.' );
 	$assert( false !== $zip->locateName( 'content/demo.txt' ), 'The bundle must contain uploaded resources.' );
 	$assert( false !== $zip->locateName( 'content/demo.xml' ), 'The bundle must contain XML resources.' );
+	$assert( false !== $zip->locateName( 'database.sql' ), 'The bundle must contain SQL resources.' );
+	$assert( false !== $zip->locateName( 'ensure-media.php' ), 'The bundle must contain PHP resources.' );
 	$zip->close();
 	$first_bundle_contents = file_get_contents( $bundle_path );
 
@@ -158,13 +205,21 @@ try {
 	);
 	$created_posts[] = $fork_change;
 	$assert( get_post_field( 'post_content', $release_id ) === Blueprint_Registry_Workflow::source( $fork_change ), 'A fork must start from the exact release source.' );
-	$assert( 2 === count( Blueprint_Registry_Bundles::get_change_files( $fork_change ) ), 'A fork must copy all bundle resources into the new draft.' );
+	$fork_files = Blueprint_Registry_Bundles::get_change_files( $fork_change );
+	$assert( 4 === count( $fork_files ), 'A fork must copy all bundle resources into the new draft.' );
+	// The reason this matters: forking used to fail outright on a bundle holding
+	// a type the Media Library rejects.
+	$fork_paths = wp_list_pluck( $fork_files, 'path' );
+	$assert(
+		in_array( 'database.sql', $fork_paths, true ) && in_array( 'ensure-media.php', $fork_paths, true ),
+		'A fork must carry file types the upload allow-list would reject.'
+	);
 	wp_set_current_user( $fork_author );
 	$assert( current_user_can( 'edit_post', $fork_change ), 'A standard logged-in contributor must be able to edit their own draft.' );
 	$assert( ! current_user_can( 'edit_post', $change_id ), 'A contributor must not be able to edit another author\'s draft.' );
 	wp_set_current_user( 1 );
 	foreach ( Blueprint_Registry_Bundles::get_change_files( $fork_change ) as $file ) {
-		$created_attachments[] = (int) $file['attachment_id'];
+
 	}
 
 	$update_one = Blueprint_Registry_Workflow::create_change(
@@ -194,7 +249,7 @@ try {
 	$assert( $updated_title === get_the_title( $update_one ), 'Editing Blueprint JSON metadata must update the proposal title.' );
 	foreach ( array( $update_one, $update_two ) as $update ) {
 		foreach ( Blueprint_Registry_Bundles::get_change_files( $update ) as $file ) {
-			$created_attachments[] = (int) $file['attachment_id'];
+	
 		}
 		$assert( true === Blueprint_Registry_Workflow::submit( $update, 1 ), 'An update based on the current release must submit.' );
 	}
@@ -207,6 +262,41 @@ try {
 	$assert( is_wp_error( $stale ) && 'blueprint_stale_change' === $stale->get_error_code(), 'An old-base update must be blocked.' );
 	$assert( 'changes_requested' === get_post_meta( $update_two, '_bp_status', true ), 'A blocked stale update must request changes.' );
 	$assert( $first_bundle_contents === file_get_contents( $bundle_path ), 'A later release must not mutate an earlier bundle.' );
+
+	// A Blueprint whose JSON contains backslashes — an escaped string inside a
+	// runPHP step, a namespace, a regex — used to lose them on the way into the
+	// submitted copy, which made it unpublishable.
+	$backslash_source = wp_json_encode(
+		array(
+			'$schema' => Blueprint_Registry_Validator::SCHEMA_URL,
+			'meta'    => array( 'title' => 'Backslash test' ),
+			'steps'   => array(
+				array(
+					'step' => 'runPHP',
+					'code' => '<?php if ( class_exists( "Friends\\Import" ) ) { echo "a\\b"; }',
+				),
+			),
+		),
+		JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+	);
+	$backslash_change = Blueprint_Registry_Workflow::create_change( array( 'title' => 'Backslash test', 'author_id' => 1 ) );
+	$assert( ! is_wp_error( $backslash_change ), 'The backslash proposal must be created.' );
+	$created_posts[] = $backslash_change;
+	Blueprint_Registry_Workflow::set_source( $backslash_change, $backslash_source );
+	$assert(
+		null !== json_decode( (string) get_post_meta( $backslash_change, '_bp_blueprint_json', true ), true ),
+		'Backslashes must survive being stored in post meta.'
+	);
+	$assert( true === Blueprint_Registry_Workflow::submit( $backslash_change, 1 ), 'A Blueprint containing backslashes must submit.' );
+	$backslash_submission = Blueprint_Registry_Workflow::current_submission_id( $backslash_change );
+	$assert(
+		null !== json_decode( (string) get_post_field( 'post_content', $backslash_submission ), true ),
+		'Backslashes must survive being copied into the submitted version.'
+	);
+	$backslash_release = Blueprint_Registry_Workflow::review( $backslash_change, 'approved', 1 );
+	$assert( ! is_wp_error( $backslash_release ), 'A Blueprint containing backslashes must publish.' );
+	$created_posts[] = $backslash_release;
+	$created_posts[] = (int) get_post_meta( $backslash_change, '_bp_target_blueprint_id', true );
 
 	fwrite( STDOUT, "PASS integration: validation, submission, immutable bundles, forks, and stale-update protection.\n" );
 } catch ( Throwable $error ) {
@@ -228,7 +318,7 @@ try {
 		);
 		foreach ( $submissions as $submission ) {
 			foreach ( Blueprint_Registry_Bundles::get_submission_files( $submission->ID ) as $file ) {
-				$created_attachments[] = (int) $file['attachment_id'];
+		
 			}
 			$submission_posts[] = $submission->ID;
 		}

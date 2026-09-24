@@ -21,39 +21,17 @@ final class Blueprint_Registry_Bundles {
 	 * a reviewer and a later release independent from any further draft edits.
 	 */
 	public static function copy_change_files_to_submission( $change_id, $submission_id ) {
-		$files       = array();
-		$attachments = array();
+		$files = array();
+
 		foreach ( self::get_change_files( $change_id ) as $file ) {
-			$path = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] ?? '' );
-			$disk = get_attached_file( (int) ( $file['attachment_id'] ?? 0 ) );
-			if ( is_wp_error( $path ) || ! is_readable( $disk ) ) {
-				foreach ( $attachments as $attachment_id ) {
-					wp_delete_attachment( $attachment_id, true );
+			$copied = Blueprint_Registry_Storage::copy( $change_id, $file, $submission_id, $files );
+			if ( is_wp_error( $copied ) ) {
+				foreach ( $files as $stored ) {
+					Blueprint_Registry_Storage::delete( $submission_id, $stored );
 				}
-				return is_wp_error( $path ) ? $path : new WP_Error( 'blueprint_submission_file_unavailable', __( 'A bundle file could not be copied for review.', 'blueprint-registry' ) );
+				return $copied;
 			}
-
-			$uploaded = wp_upload_bits( basename( $path ), null, file_get_contents( $disk ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-			if ( ! empty( $uploaded['error'] ) ) {
-				foreach ( $attachments as $attachment_id ) {
-					wp_delete_attachment( $attachment_id, true );
-				}
-				return new WP_Error( 'blueprint_upload_failed', $uploaded['error'] );
-			}
-
-			$attachment_id = self::attach_uploaded_file( $uploaded['file'], $submission_id );
-			if ( is_wp_error( $attachment_id ) ) {
-				foreach ( $attachments as $created_attachment_id ) {
-					wp_delete_attachment( $created_attachment_id, true );
-				}
-				return $attachment_id;
-			}
-
-			$attachments[] = $attachment_id;
-			$files[]       = array(
-				'attachment_id' => $attachment_id,
-				'path'          => $path,
-			);
+			$files[] = $copied;
 		}
 
 		update_post_meta( $submission_id, '_bp_submission_files', $files );
@@ -66,70 +44,172 @@ final class Blueprint_Registry_Bundles {
 	 */
 	public static function replace_change_files_from_change( $source_change_id, $target_change_id ) {
 		foreach ( self::get_change_files( $target_change_id ) as $file ) {
-			wp_delete_attachment( (int) $file['attachment_id'], true );
+			Blueprint_Registry_Storage::delete( $target_change_id, $file );
 		}
 		update_post_meta( $target_change_id, '_bp_change_files', array() );
 
-		$attachments = array();
+		$files = array();
 		foreach ( self::get_change_files( $source_change_id ) as $file ) {
-			$path = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] ?? '' );
-			$disk = get_attached_file( (int) ( $file['attachment_id'] ?? 0 ) );
-			if ( is_wp_error( $path ) || ! is_readable( $disk ) ) {
-				foreach ( $attachments as $attachment_id ) {
-					wp_delete_attachment( $attachment_id, true );
+			$copied = Blueprint_Registry_Storage::copy( $source_change_id, $file, $target_change_id, $files );
+			if ( is_wp_error( $copied ) ) {
+				foreach ( $files as $stored ) {
+					Blueprint_Registry_Storage::delete( $target_change_id, $stored );
 				}
-				return is_wp_error( $path ) ? $path : new WP_Error( 'blueprint_follow_up_file_unavailable', __( 'A later draft file could not be copied.', 'blueprint-registry' ) );
+				return $copied;
 			}
-
-			$uploaded = wp_upload_bits( basename( $path ), null, file_get_contents( $disk ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-			if ( ! empty( $uploaded['error'] ) ) {
-				foreach ( $attachments as $attachment_id ) {
-					wp_delete_attachment( $attachment_id, true );
-				}
-				return new WP_Error( 'blueprint_upload_failed', $uploaded['error'] );
-			}
-			$attachment_id = self::attach_uploaded_file( $uploaded['file'], $target_change_id );
-			if ( is_wp_error( $attachment_id ) ) {
-				foreach ( $attachments as $created_attachment_id ) {
-					wp_delete_attachment( $created_attachment_id, true );
-				}
-				return $attachment_id;
-			}
-			$attachments[] = $attachment_id;
-			self::add_change_file( $target_change_id, $attachment_id, $path );
+			$files[] = $copied;
 		}
 
+		update_post_meta( $target_change_id, '_bp_change_files', $files );
 		return true;
 	}
 
-	public static function add_change_file( $change_id, $attachment_id, $path ) {
-		$path = Blueprint_Registry_Validator::normalise_bundle_path( $path );
-		if ( is_wp_error( $path ) ) {
-			return $path;
+	/**
+	 * Stores an uploaded file against a proposal and records it in the bundle.
+	 */
+	public static function add_change_file( $change_id, $contents, $path ) {
+		$files  = self::get_change_files( $change_id );
+		$record = Blueprint_Registry_Storage::store( $change_id, $contents, $path, $files );
+		if ( is_wp_error( $record ) ) {
+			return $record;
 		}
 
-		$files   = self::get_change_files( $change_id );
-		$files[] = array(
-			'attachment_id' => (int) $attachment_id,
-			'path'          => $path,
-		);
+		$files[] = $record;
 		update_post_meta( $change_id, '_bp_change_files', $files );
 
-		return true;
+		return $record;
 	}
 
-	public static function remove_change_file( $change_id, $attachment_id ) {
-		$files = array_filter(
-			self::get_change_files( $change_id ),
-			static function ( $file ) use ( $attachment_id ) {
-				return (int) $file['attachment_id'] !== (int) $attachment_id;
+	/**
+	 * Same, for a file already on disk.
+	 */
+	public static function add_change_file_from_disk( $change_id, $source_path, $path ) {
+		$files  = self::get_change_files( $change_id );
+		$record = Blueprint_Registry_Storage::store_file( $change_id, $source_path, $path, $files );
+		if ( is_wp_error( $record ) ) {
+			return $record;
+		}
+
+		$files[] = $record;
+		update_post_meta( $change_id, '_bp_change_files', $files );
+
+		return $record;
+	}
+
+	/**
+	 * Adds or replaces draft files from one browser-created ZIP archive.
+	 *
+	 * The archive is the only thing submitted through the upload endpoint. Its
+	 * entries are unpacked only after WordPress has accepted that ZIP through its
+	 * ordinary upload checks.
+	 */
+	public static function import_change_archive( $change_id, $archive_path ) {
+		if ( ! class_exists( 'ZipArchive' ) ) {
+			return new WP_Error( 'blueprint_zip_missing', __( 'The server needs the PHP ZipArchive extension.', 'blueprint-registry' ) );
+		}
+
+		$zip = new ZipArchive();
+		if ( true !== $zip->open( $archive_path ) ) {
+			return new WP_Error( 'blueprint_zip_unreadable', __( 'The uploaded bundle is not a readable ZIP archive.', 'blueprint-registry' ) );
+		}
+		if ( $zip->numFiles > Blueprint_Registry_Storage::MAX_FILES ) {
+			$zip->close();
+			return new WP_Error( 'blueprint_too_many_files', sprintf( __( 'A bundle may hold at most %d files.', 'blueprint-registry' ), Blueprint_Registry_Storage::MAX_FILES ) );
+		}
+
+		$incoming      = array();
+		$incoming_size = 0;
+		for ( $index = 0; $index < $zip->numFiles; $index++ ) {
+			$name = $zip->getNameIndex( $index );
+			if ( false === $name || str_ends_with( $name, '/' ) ) {
+				continue;
 			}
-		);
-		update_post_meta( $change_id, '_bp_change_files', array_values( $files ) );
+
+			$path = Blueprint_Registry_Validator::normalise_bundle_path( $name );
+			if ( is_wp_error( $path ) ) {
+				$zip->close();
+				return $path;
+			}
+			if ( isset( $incoming[ $path ] ) ) {
+				$zip->close();
+				return new WP_Error( 'blueprint_duplicate_bundle_path', sprintf( __( 'The uploaded bundle contains %s more than once.', 'blueprint-registry' ), $path ) );
+			}
+
+			$stat = $zip->statIndex( $index );
+			if ( ! is_array( $stat ) ) {
+				$zip->close();
+				return new WP_Error( 'blueprint_zip_unreadable', __( 'The uploaded bundle could not be inspected.', 'blueprint-registry' ) );
+			}
+			$size = (int) ( $stat['size'] ?? -1 );
+			if ( $size < 0 || $size > Blueprint_Registry_Storage::MAX_FILE_BYTES ) {
+				$zip->close();
+				return new WP_Error( 'blueprint_file_too_large', sprintf( __( 'The file at %s is too large.', 'blueprint-registry' ), $path ) );
+			}
+
+			$incoming_size += $size;
+			if ( $incoming_size > Blueprint_Registry_Storage::MAX_BUNDLE_BYTES ) {
+				$zip->close();
+				return new WP_Error( 'blueprint_bundle_too_large', __( 'The uploaded bundle is too large.', 'blueprint-registry' ) );
+			}
+
+			$contents = $zip->getFromIndex( $index );
+			if ( false === $contents || strlen( $contents ) !== $size ) {
+				$zip->close();
+				return new WP_Error( 'blueprint_zip_unreadable', sprintf( __( 'The file at %s could not be read from the uploaded bundle.', 'blueprint-registry' ), $path ) );
+			}
+			$incoming[ $path ] = $contents;
+		}
+		$zip->close();
+
+		if ( ! $incoming ) {
+			return new WP_Error( 'blueprint_empty_bundle', __( 'The uploaded bundle does not contain any files.', 'blueprint-registry' ) );
+		}
+
+		$replaced = array();
+		$kept     = array();
+		foreach ( self::get_change_files( $change_id ) as $file ) {
+			if ( isset( $incoming[ $file['path'] ?? '' ] ) ) {
+				$replaced[] = $file;
+				continue;
+			}
+			$kept[] = $file;
+		}
+
+		$stored = array();
+		foreach ( $incoming as $path => $contents ) {
+			$record = Blueprint_Registry_Storage::store( $change_id, $contents, $path, array_merge( $kept, $stored ) );
+			if ( is_wp_error( $record ) ) {
+				foreach ( $stored as $created ) {
+					Blueprint_Registry_Storage::delete( $change_id, $created );
+				}
+				return $record;
+			}
+			$stored[] = $record;
+		}
+
+		update_post_meta( $change_id, '_bp_change_files', array_merge( $kept, $stored ) );
+		foreach ( $replaced as $file ) {
+			Blueprint_Registry_Storage::delete( $change_id, $file );
+		}
+
+		return $stored;
 	}
 
-	public static function build_release_bundle( $release_id, $source, array $files ) {
-		$path = self::build_zip( $source, $files, 'blueprint-release-' . $release_id . '.zip' );
+	public static function remove_change_file( $change_id, $key ) {
+		$kept = array();
+		foreach ( self::get_change_files( $change_id ) as $file ) {
+			if ( ( $file['key'] ?? '' ) === (string) $key ) {
+				Blueprint_Registry_Storage::delete( $change_id, $file );
+				continue;
+			}
+			$kept[] = $file;
+		}
+
+		update_post_meta( $change_id, '_bp_change_files', $kept );
+	}
+
+	public static function build_release_bundle( $release_id, $source, array $files, $owner_id ) {
+		$path = self::build_zip( $source, $files, 'blueprint-release-' . $release_id . '.zip', false, $owner_id );
 		if ( is_wp_error( $path ) ) {
 			return $path;
 		}
@@ -147,7 +227,7 @@ final class Blueprint_Registry_Bundles {
 		}
 
 		$source = Blueprint_Registry_Validator::canonical_json( Blueprint_Registry_Workflow::source( $change_id ) );
-		$path   = self::build_zip( $source, self::get_change_files( $change_id ), 'blueprint-preview-' . $change_id . '.zip', true );
+		$path   = self::build_zip( $source, self::get_change_files( $change_id ), 'blueprint-preview-' . $change_id . '.zip', true, $change_id );
 		if ( is_wp_error( $path ) ) {
 			return $path;
 		}
@@ -165,12 +245,12 @@ final class Blueprint_Registry_Bundles {
 	 */
 	public static function build_submission_preview( $submission_id ) {
 		$source = (string) get_post_field( 'post_content', $submission_id );
-		$errors = Blueprint_Registry_Validator::validate( $source, self::get_submission_files( $submission_id ) );
+		$errors = Blueprint_Registry_Validator::validate( $source, self::get_submission_files( $submission_id ), $submission_id );
 		if ( $errors ) {
 			return new WP_Error( 'blueprint_invalid_submission', implode( ' ', $errors ) );
 		}
 
-		$path = self::build_zip( $source, self::get_submission_files( $submission_id ), 'blueprint-preview-' . $submission_id . '.zip', true );
+		$path = self::build_zip( $source, self::get_submission_files( $submission_id ), 'blueprint-preview-' . $submission_id . '.zip', true, $submission_id );
 		if ( is_wp_error( $path ) ) {
 			return $path;
 		}
@@ -195,18 +275,21 @@ final class Blueprint_Registry_Bundles {
 		return $path;
 	}
 
+	/**
+	 * Checksums every file in a bundle. The stored record already carries one,
+	 * so this is a lookup rather than a re-read of the whole bundle.
+	 */
 	public static function release_manifest( $source, array $files ) {
 		$manifest = array(
 			'blueprint.json' => hash( 'sha256', $source ),
 		);
 
 		foreach ( $files as $file ) {
-			$path = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] );
-			$disk = get_attached_file( (int) $file['attachment_id'] );
-			if ( is_wp_error( $path ) || ! is_readable( $disk ) ) {
+			$path = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] ?? '' );
+			if ( is_wp_error( $path ) || empty( $file['sha256'] ) ) {
 				continue;
 			}
-			$manifest[ $path ] = hash_file( 'sha256', $disk );
+			$manifest[ $path ] = $file['sha256'];
 		}
 
 		ksort( $manifest );
@@ -217,12 +300,12 @@ final class Blueprint_Registry_Bundles {
 		$bundle_id = (int) get_post_meta( $release_id, '_bp_bundle_attachment_id', true );
 		$bundle    = get_attached_file( $bundle_id );
 		if ( ! class_exists( 'ZipArchive' ) || ! is_readable( $bundle ) ) {
-			return new WP_Error( 'blueprint_bundle_unavailable', __( 'The release bundle is unavailable.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_bundle_unavailable', __( 'The revision bundle is unavailable.', 'blueprint-registry' ) );
 		}
 
 		$zip = new ZipArchive();
 		if ( true !== $zip->open( $bundle ) ) {
-			return new WP_Error( 'blueprint_bundle_unreadable', __( 'The release bundle could not be opened.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_bundle_unreadable', __( 'The revision bundle could not be opened.', 'blueprint-registry' ) );
 		}
 
 		for ( $index = 0; $index < $zip->numFiles; $index++ ) {
@@ -240,21 +323,14 @@ final class Blueprint_Registry_Bundles {
 			$contents = $zip->getFromIndex( $index );
 			if ( false === $contents ) {
 				$zip->close();
-				return new WP_Error( 'blueprint_bundle_unreadable', __( 'A release file could not be copied.', 'blueprint-registry' ) );
+				return new WP_Error( 'blueprint_bundle_unreadable', __( 'A revision file could not be copied.', 'blueprint-registry' ) );
 			}
 
-			$uploaded = wp_upload_bits( basename( $path ), null, $contents );
-			if ( ! empty( $uploaded['error'] ) ) {
+			$stored = self::add_change_file( $change_id, $contents, $path );
+			if ( is_wp_error( $stored ) ) {
 				$zip->close();
-				return new WP_Error( 'blueprint_upload_failed', $uploaded['error'] );
+				return $stored;
 			}
-
-			$attachment_id = self::attach_uploaded_file( $uploaded['file'], $change_id );
-			if ( is_wp_error( $attachment_id ) ) {
-				$zip->close();
-				return $attachment_id;
-			}
-			self::add_change_file( $change_id, $attachment_id, $path );
 		}
 
 		$zip->close();
@@ -268,7 +344,7 @@ final class Blueprint_Registry_Bundles {
 	public static function release_file_entries( $release_id ) {
 		$release = get_post( $release_id );
 		if ( ! $release || 'blueprint_release' !== $release->post_type ) {
-			return new WP_Error( 'blueprint_missing_release', __( 'The Blueprint release does not exist.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_missing_release', __( 'The Blueprint revision does not exist.', 'blueprint-registry' ) );
 		}
 
 		$manifest = self::stored_release_manifest( $release_id );
@@ -286,7 +362,7 @@ final class Blueprint_Registry_Bundles {
 
 		$zip = new ZipArchive();
 		if ( true !== $zip->open( $bundle ) ) {
-			return new WP_Error( 'blueprint_bundle_unreadable', __( 'The release bundle could not be opened.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_bundle_unreadable', __( 'The revision bundle could not be opened.', 'blueprint-registry' ) );
 		}
 
 		for ( $index = 0; $index < $zip->numFiles; $index++ ) {
@@ -335,17 +411,17 @@ final class Blueprint_Registry_Bundles {
 		}
 		$bundle = get_attached_file( (int) get_post_meta( $release_id, '_bp_bundle_attachment_id', true ) );
 		if ( ! class_exists( 'ZipArchive' ) || ! is_readable( $bundle ) ) {
-			return new WP_Error( 'blueprint_bundle_unavailable', __( 'The release bundle is unavailable.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_bundle_unavailable', __( 'The revision bundle is unavailable.', 'blueprint-registry' ) );
 		}
 
 		$zip = new ZipArchive();
 		if ( true !== $zip->open( $bundle ) ) {
-			return new WP_Error( 'blueprint_bundle_unreadable', __( 'The release bundle could not be opened.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_bundle_unreadable', __( 'The revision bundle could not be opened.', 'blueprint-registry' ) );
 		}
 		$stat = $zip->statName( $path );
 		if ( ! is_array( $stat ) ) {
 			$zip->close();
-			return new WP_Error( 'blueprint_file_missing', __( 'The release file does not exist.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_file_missing', __( 'The revision file does not exist.', 'blueprint-registry' ) );
 		}
 		if ( (int) $stat['size'] > $maximum_size ) {
 			$zip->close();
@@ -354,7 +430,7 @@ final class Blueprint_Registry_Bundles {
 		$contents = $zip->getFromName( $path );
 		$zip->close();
 
-		return false === $contents ? new WP_Error( 'blueprint_bundle_unreadable', __( 'The release file could not be read.', 'blueprint-registry' ) ) : $contents;
+		return false === $contents ? new WP_Error( 'blueprint_bundle_unreadable', __( 'The revision file could not be read.', 'blueprint-registry' ) ) : $contents;
 	}
 
 	/**
@@ -367,12 +443,12 @@ final class Blueprint_Registry_Bundles {
 		}
 		$bundle = get_attached_file( (int) get_post_meta( $release_id, '_bp_bundle_attachment_id', true ) );
 		if ( ! class_exists( 'ZipArchive' ) || ! is_readable( $bundle ) ) {
-			wp_die( esc_html__( 'The release bundle is unavailable.', 'blueprint-registry' ), esc_html__( 'Not found', 'blueprint-registry' ), array( 'response' => 404 ) );
+			wp_die( esc_html__( 'The revision bundle is unavailable.', 'blueprint-registry' ), esc_html__( 'Not found', 'blueprint-registry' ), array( 'response' => 404 ) );
 		}
 
 		$zip = new ZipArchive();
 		if ( true !== $zip->open( $bundle ) || ! ( $stream = $zip->getStream( $path ) ) ) {
-			wp_die( esc_html__( 'The release file does not exist.', 'blueprint-registry' ), esc_html__( 'Not found', 'blueprint-registry' ), array( 'response' => 404 ) );
+			wp_die( esc_html__( 'The revision file does not exist.', 'blueprint-registry' ), esc_html__( 'Not found', 'blueprint-registry' ), array( 'response' => 404 ) );
 		}
 		$stat = $zip->statName( $path );
 		nocache_headers();
@@ -400,7 +476,7 @@ final class Blueprint_Registry_Bundles {
 		foreach ( self::get_change_files( $change_id ) as $file ) {
 			$path = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] ?? '' );
 			if ( ! is_wp_error( $path ) ) {
-				$proposal_files[ $path ] = (int) $file['attachment_id'];
+				$proposal_files[ $path ] = (string) ( $file['key'] ?? '' );
 			}
 		}
 
@@ -416,7 +492,7 @@ final class Blueprint_Registry_Bundles {
 				'status'               => $status,
 				'base_checksum'        => $base_manifest[ $path ] ?? '',
 				'proposal_checksum'    => $proposal_manifest[ $path ] ?? '',
-				'proposal_attachment_id' => $proposal_files[ $path ] ?? 0,
+				'proposal_key'           => $proposal_files[ $path ] ?? '',
 			);
 		}
 
@@ -426,6 +502,52 @@ final class Blueprint_Registry_Bundles {
 	/**
 	 * Compares a published release with the fixed copy currently in review.
 	 */
+	/**
+	 * Compares two published revisions.
+	 *
+	 * Both sides are immutable and both already carry a checksum manifest, so
+	 * this is a straight comparison of the two manifests.
+	 */
+	public static function diff_release_to_release( $base_release_id, $target_release_id ) {
+		$base_manifest   = self::stored_release_manifest( $base_release_id );
+		$target_manifest = self::stored_release_manifest( $target_release_id );
+
+		$paths = array_unique( array_merge( array_keys( $base_manifest ), array_keys( $target_manifest ) ) );
+		sort( $paths, SORT_NATURAL | SORT_FLAG_CASE );
+
+		$diff = array();
+		foreach ( $paths as $path ) {
+			$in_base   = array_key_exists( $path, $base_manifest );
+			$in_target = array_key_exists( $path, $target_manifest );
+			$diff[]    = array(
+				'path'                   => $path,
+				'status'                 => ! $in_base ? 'added' : ( ! $in_target ? 'removed' : ( $base_manifest[ $path ] === $target_manifest[ $path ] ? 'unchanged' : 'changed' ) ),
+				'base_checksum'          => $base_manifest[ $path ] ?? '',
+				'proposal_checksum'      => $target_manifest[ $path ] ?? '',
+				'proposal_key'           => '',
+			);
+		}
+
+		return $diff;
+	}
+
+	/**
+	 * Reads one file from two revisions, for a side-by-side text comparison.
+	 */
+	public static function text_file_pair_releases( $base_release_id, $target_release_id, $path, $maximum_size = 262144 ) {
+		$base   = isset( self::stored_release_manifest( $base_release_id )[ $path ] ) ? self::release_file_contents( $base_release_id, $path, $maximum_size ) : '';
+		$target = isset( self::stored_release_manifest( $target_release_id )[ $path ] ) ? self::release_file_contents( $target_release_id, $path, $maximum_size ) : '';
+
+		if ( is_wp_error( $base ) || is_wp_error( $target ) || ! self::is_text( $base ) || ! self::is_text( $target ) ) {
+			return null;
+		}
+
+		return array(
+			'base'     => $base,
+			'proposal' => $target,
+		);
+	}
+
 	public static function diff_release_to_submission( $release_id, $submission_id ) {
 		$base_manifest     = self::stored_release_manifest( $release_id );
 		$proposal_manifest = self::submission_manifest( $submission_id );
@@ -433,7 +555,7 @@ final class Blueprint_Registry_Bundles {
 		foreach ( self::get_submission_files( $submission_id ) as $file ) {
 			$path = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] ?? '' );
 			if ( ! is_wp_error( $path ) ) {
-				$proposal_files[ $path ] = (int) $file['attachment_id'];
+				$proposal_files[ $path ] = (string) ( $file['key'] ?? '' );
 			}
 		}
 
@@ -449,7 +571,7 @@ final class Blueprint_Registry_Bundles {
 				'status'                 => $status,
 				'base_checksum'          => $base_manifest[ $path ] ?? '',
 				'proposal_checksum'      => $proposal_manifest[ $path ] ?? '',
-				'proposal_attachment_id' => $proposal_files[ $path ] ?? 0,
+				'proposal_key'           => $proposal_files[ $path ] ?? '',
 			);
 		}
 
@@ -460,7 +582,7 @@ final class Blueprint_Registry_Bundles {
 	 * Returns the two text values needed for a native WordPress text diff.
 	 */
 	public static function text_file_pair( $release_id, $change_id, $path, $maximum_size = 262144 ) {
-		$base = self::release_file_contents( $release_id, $path, $maximum_size );
+		$base = isset( self::stored_release_manifest( $release_id )[ $path ] ) ? self::release_file_contents( $release_id, $path, $maximum_size ) : '';
 		if ( is_wp_error( $base ) || ! self::is_text( $base ) ) {
 			return null;
 		}
@@ -468,16 +590,11 @@ final class Blueprint_Registry_Bundles {
 		if ( 'blueprint.json' === $path ) {
 			$proposal = Blueprint_Registry_Workflow::source( $change_id );
 		} else {
-			$proposal = null;
-			foreach ( self::get_change_files( $change_id ) as $file ) {
-				$candidate = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] ?? '' );
-				if ( ! is_wp_error( $candidate ) && $candidate === $path ) {
-					$disk = get_attached_file( (int) $file['attachment_id'] );
-					if ( is_readable( $disk ) && filesize( $disk ) <= $maximum_size ) {
-						$proposal = file_get_contents( $disk ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-					}
-					break;
-				}
+			$proposal = '';
+			$file     = Blueprint_Registry_Storage::find( self::get_change_files( $change_id ), $path );
+			if ( $file ) {
+				$read     = Blueprint_Registry_Storage::read( $change_id, $file, $maximum_size );
+				$proposal = is_wp_error( $read ) ? null : $read;
 			}
 		}
 
@@ -495,7 +612,7 @@ final class Blueprint_Registry_Bundles {
 	 * Returns the two text values for a release and a fixed submitted copy.
 	 */
 	public static function text_file_pair_submission( $release_id, $submission_id, $path, $maximum_size = 262144 ) {
-		$base = self::release_file_contents( $release_id, $path, $maximum_size );
+		$base = isset( self::stored_release_manifest( $release_id )[ $path ] ) ? self::release_file_contents( $release_id, $path, $maximum_size ) : '';
 		if ( is_wp_error( $base ) || ! self::is_text( $base ) ) {
 			return null;
 		}
@@ -503,7 +620,7 @@ final class Blueprint_Registry_Bundles {
 		if ( 'blueprint.json' === $path ) {
 			$proposal = (string) get_post_field( 'post_content', $submission_id );
 		} else {
-			$proposal = self::submitted_file_contents( $submission_id, $path, $maximum_size );
+			$proposal = Blueprint_Registry_Storage::find( self::get_submission_files( $submission_id ), $path ) ? self::submitted_file_contents( $submission_id, $path, $maximum_size ) : '';
 		}
 
 		if ( is_wp_error( $proposal ) || ! is_string( $proposal ) || ! self::is_text( $proposal ) ) {
@@ -566,29 +683,19 @@ final class Blueprint_Registry_Bundles {
 	}
 
 	private static function submitted_file_contents( $submission_id, $path, $maximum_size ) {
-		foreach ( self::get_submission_files( $submission_id ) as $file ) {
-			$candidate = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] ?? '' );
-			if ( is_wp_error( $candidate ) || $candidate !== $path ) {
-				continue;
-			}
-			$disk = get_attached_file( (int) $file['attachment_id'] );
-			if ( ! is_readable( $disk ) ) {
-				return new WP_Error( 'blueprint_submission_file_unavailable', __( 'The submitted bundle file is unavailable.', 'blueprint-registry' ) );
-			}
-			if ( filesize( $disk ) > $maximum_size ) {
-				return new WP_Error( 'blueprint_file_too_large', __( 'This file is too large to show in the browser.', 'blueprint-registry' ) );
-			}
-			return file_get_contents( $disk ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$file = Blueprint_Registry_Storage::find( self::get_submission_files( $submission_id ), $path );
+		if ( ! $file ) {
+			return new WP_Error( 'blueprint_file_missing', __( 'The submitted bundle file does not exist.', 'blueprint-registry' ) );
 		}
 
-		return new WP_Error( 'blueprint_file_missing', __( 'The submitted bundle file does not exist.', 'blueprint-registry' ) );
+		return Blueprint_Registry_Storage::read( $submission_id, $file, $maximum_size );
 	}
 
 	private static function is_text( $contents ) {
 		return is_string( $contents ) && ! str_contains( $contents, "\0" );
 	}
 
-	private static function build_zip( $source, array $files, $name, $preview = false ) {
+	private static function build_zip( $source, array $files, $name, $preview = false, $owner_id = 0 ) {
 		if ( ! class_exists( 'ZipArchive' ) ) {
 			return new WP_Error( 'blueprint_zip_missing', __( 'The server needs the PHP ZipArchive extension.', 'blueprint-registry' ) );
 		}
@@ -603,9 +710,9 @@ final class Blueprint_Registry_Bundles {
 
 		$zip->addFromString( 'blueprint.json', $source );
 		foreach ( $files as $file ) {
-			$bundle_path = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] );
-			$disk_path   = get_attached_file( (int) $file['attachment_id'] );
-			if ( is_wp_error( $bundle_path ) || ! is_readable( $disk_path ) || ! $zip->addFile( $disk_path, $bundle_path ) ) {
+			$bundle_path = Blueprint_Registry_Validator::normalise_bundle_path( $file['path'] ?? '' );
+			$disk_path   = Blueprint_Registry_Storage::file_path( $owner_id, $file['key'] ?? '' );
+			if ( is_wp_error( $bundle_path ) || is_wp_error( $disk_path ) || ! is_readable( $disk_path ) || ! $zip->addFile( $disk_path, $bundle_path ) ) {
 				$zip->close();
 				@unlink( $path );
 				return new WP_Error( 'blueprint_zip_failed', __( 'A bundle file could not be added to the archive.', 'blueprint-registry' ) );
@@ -616,6 +723,11 @@ final class Blueprint_Registry_Bundles {
 		return $path;
 	}
 
+	/**
+	 * Attaches the public release bundle. This one is meant to be fetchable —
+	 * it is the URL handed out for `?blueprint-url=` — so it stays an
+	 * attachment, unlike the proposal files it was built from.
+	 */
 	private static function attach_file( $source_path, $filename, $parent_id, $mime_type ) {
 		$uploaded = wp_upload_bits( $filename, null, file_get_contents( $source_path ) );
 		if ( ! empty( $uploaded['error'] ) ) {

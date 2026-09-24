@@ -16,7 +16,7 @@ final class Blueprint_Registry_Routes {
 
 	public function enqueue_gallery_assets() {
 		if ( is_post_type_archive( 'blueprint' ) || is_singular( 'blueprint' ) || get_query_var( 'bp_release_file' ) ) {
-			wp_enqueue_style( 'blueprint-registry-gallery', BLUEPRINT_REGISTRY_URL . 'assets/gallery.css', array(), BLUEPRINT_REGISTRY_VERSION );
+			Blueprint_Registry_Assets::enqueue_front();
 		}
 	}
 
@@ -34,14 +34,88 @@ final class Blueprint_Registry_Routes {
 		return $template;
 	}
 
+	/**
+	 * Applies the gallery view state — search text, category, and sort — to the
+	 * main query so paging and canonical URLs keep working.
+	 */
 	public function order_gallery( $query ) {
 		if ( is_admin() || ! $query->is_main_query() || ! $query->is_post_type_archive( 'blueprint' ) ) {
 			return;
 		}
 
-		$query->set( 'meta_key', '_bp_gallery_order' );
-		$query->set( 'orderby', 'meta_value_num' );
-		$query->set( 'order', 'ASC' );
+		$query->set( 'posts_per_page', 24 );
+
+		$search = self::gallery_search();
+		if ( '' !== $search ) {
+			$query->set( 's', $search );
+		}
+
+		$category = self::gallery_category();
+		if ( '' !== $category ) {
+			$query->set(
+				'tax_query',
+				array(
+					array(
+						'taxonomy' => 'blueprint_category',
+						'field'    => 'slug',
+						'terms'    => $category,
+					),
+				)
+			);
+		}
+
+		switch ( self::gallery_sort() ) {
+			case 'title':
+				$query->set( 'orderby', 'title' );
+				$query->set( 'order', 'ASC' );
+				break;
+			case 'updated':
+				$query->set( 'orderby', 'modified' );
+				$query->set( 'order', 'DESC' );
+				break;
+			default:
+				if ( '' === $search ) {
+					$query->set( 'meta_key', '_bp_gallery_order' );
+					$query->set( 'orderby', 'meta_value_num' );
+					$query->set( 'order', 'ASC' );
+				}
+		}
+	}
+
+	public static function gallery_search() {
+		return isset( $_GET['bp_q'] ) ? sanitize_text_field( wp_unslash( $_GET['bp_q'] ) ) : '';
+	}
+
+	public static function gallery_category() {
+		return isset( $_GET['bp_category'] ) ? sanitize_title( wp_unslash( $_GET['bp_category'] ) ) : '';
+	}
+
+	public static function gallery_sort() {
+		$sort = isset( $_GET['bp_sort'] ) ? sanitize_key( wp_unslash( $_GET['bp_sort'] ) ) : 'featured';
+		return in_array( $sort, array( 'featured', 'title', 'updated' ), true ) ? $sort : 'featured';
+	}
+
+	public static function gallery_layout() {
+		$layout = isset( $_GET['bp_layout'] ) ? sanitize_key( wp_unslash( $_GET['bp_layout'] ) ) : 'grid';
+		return 'table' === $layout ? 'table' : 'grid';
+	}
+
+	/**
+	 * Builds a gallery URL with one view argument replaced and paging reset.
+	 */
+	public static function gallery_url( array $args = array() ) {
+		$current = array(
+			'bp_q'        => self::gallery_search(),
+			'bp_category' => self::gallery_category(),
+			'bp_sort'     => 'featured' === self::gallery_sort() ? '' : self::gallery_sort(),
+			'bp_layout'   => 'grid' === self::gallery_layout() ? '' : self::gallery_layout(),
+		);
+
+		$merged = array_filter( array_merge( $current, $args ), static function ( $value ) {
+			return '' !== $value && null !== $value;
+		} );
+
+		return add_query_arg( $merged, get_post_type_archive_link( 'blueprint' ) );
 	}
 
 	public function add_rewrite_rules() {
@@ -87,7 +161,7 @@ final class Blueprint_Registry_Routes {
 		if ( $release_file && isset( $_GET['download'] ) ) {
 			$release = self::find_release( sanitize_title_for_query( get_query_var( 'bp_blueprint_slug' ) ), (int) get_query_var( 'bp_release_number' ) );
 			if ( ! $release ) {
-				wp_die( esc_html__( 'Blueprint release not found.', 'blueprint-registry' ), esc_html__( 'Not found', 'blueprint-registry' ), array( 'response' => 404 ) );
+				wp_die( esc_html__( 'Blueprint revision not found.', 'blueprint-registry' ), esc_html__( 'Not found', 'blueprint-registry' ), array( 'response' => 404 ) );
 			}
 			Blueprint_Registry_Bundles::stream_release_file( $release->ID, rawurldecode( $release_file ) );
 		}
@@ -99,7 +173,7 @@ final class Blueprint_Registry_Routes {
 
 		$release = self::find_release( sanitize_title_for_query( get_query_var( 'bp_blueprint_slug' ) ), (int) get_query_var( 'bp_release_number' ) );
 		if ( ! $release ) {
-			wp_die( esc_html__( 'Blueprint release not found.', 'blueprint-registry' ), esc_html__( 'Not found', 'blueprint-registry' ), array( 'response' => 404 ) );
+			wp_die( esc_html__( 'Blueprint revision not found.', 'blueprint-registry' ), esc_html__( 'Not found', 'blueprint-registry' ), array( 'response' => 404 ) );
 		}
 
 		if ( 'json' === $artifact ) {

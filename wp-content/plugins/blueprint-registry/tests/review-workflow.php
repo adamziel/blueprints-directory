@@ -27,25 +27,29 @@ $source_for = static function ( $title, $marker ) {
 	) . "\n";
 };
 
-$attachment = static function ( $name, $contents, $parent_id ) use ( &$created_attachments ) {
-	$upload = wp_upload_bits( $name, null, $contents );
-	if ( ! empty( $upload['error'] ) ) {
-		throw new RuntimeException( $upload['error'] );
+// Bundle files live in private storage now; write contents straight in.
+$add_file = static function ( $change_id, $path, $contents ) {
+	$record = Blueprint_Registry_Bundles::add_change_file( $change_id, $contents, $path );
+	if ( is_wp_error( $record ) ) {
+		throw new RuntimeException( $record->get_error_message() );
 	}
-	$attachment_id = wp_insert_attachment(
-		array(
-			'post_title'     => $name,
-			'post_mime_type' => 'text/plain',
-			'post_status'    => 'inherit',
-		),
-		$upload['file'],
-		$parent_id
-	);
-	if ( is_wp_error( $attachment_id ) ) {
-		throw new RuntimeException( $attachment_id->get_error_message() );
+
+	return $record;
+};
+
+// Editing a bundle file is remove-then-add, the same as a contributor replacing
+// one in the editor.
+$set_file = static function ( $change_id, $path, $contents ) {
+	foreach ( Blueprint_Registry_Bundles::get_change_files( $change_id ) as $file ) {
+		Blueprint_Registry_Bundles::remove_change_file( $change_id, $file['key'] );
 	}
-	$created_attachments[] = (int) $attachment_id;
-	return (int) $attachment_id;
+
+	$record = Blueprint_Registry_Bundles::add_change_file( $change_id, $contents, $path );
+	if ( is_wp_error( $record ) ) {
+		throw new RuntimeException( $record->get_error_message() );
+	}
+
+	return $record;
 };
 
 try {
@@ -88,7 +92,6 @@ try {
 		$assert( $submission_id && 'blueprint_submission' === get_post_type( $submission_id ), 'Submission must create a private submitted-version post.' );
 		$created_posts[] = $submission_id;
 		foreach ( Blueprint_Registry_Bundles::get_submission_files( $submission_id ) as $file ) {
-			$created_attachments[] = (int) $file['attachment_id'];
 		}
 		return $submission_id;
 	};
@@ -182,8 +185,7 @@ try {
 	$title     = 'Review workflow ' . wp_generate_password( 8, false );
 	$change_id = $create_change( $title );
 	Blueprint_Registry_Workflow::set_source( $change_id, $source_for( $title, 'first submitted version' ) );
-	$draft_file_id = $attachment( 'review.txt', "first file\n", $change_id );
-	$assert( true === Blueprint_Registry_Bundles::add_change_file( $change_id, $draft_file_id, 'content/review.txt' ), 'The contributor file must be added to the draft.' );
+	$assert( ! is_wp_error( $add_file( $change_id, 'content/review.txt', "first file\n" ) ), 'The contributor file must be added to the draft.' );
 
 	$other_submit = Blueprint_Registry_Workflow::submit( $change_id, $other_author_id );
 	$assert( is_wp_error( $other_submit ) && 'blueprint_forbidden' === $other_submit->get_error_code(), 'Only the proposal author may submit it.' );
@@ -193,19 +195,19 @@ try {
 	$assert( 0 < (int) get_post_meta( $submission_one, '_bp_submitted_at', true ), 'The fixed submitted version must have a queue timestamp.' );
 	$assert( Blueprint_Registry_Workflow::source( $change_id ) === get_post_field( 'post_content', $submission_one ), 'The submitted version must copy the current Blueprint JSON.' );
 	$submission_one_file = Blueprint_Registry_Bundles::get_submission_files( $submission_one )[0];
-	$assert( "first file\n" === file_get_contents( get_attached_file( $submission_one_file['attachment_id'] ) ), 'The submitted version must copy the bundle file.' );
+	$assert( "first file\n" === Blueprint_Registry_Storage::read( $submission_one, $submission_one_file ), 'The submitted version must copy the bundle file.' );
 
 	$second_source = $source_for( $title, 'second submitted version' );
 	Blueprint_Registry_Workflow::set_source( $change_id, $second_source );
-	file_put_contents( get_attached_file( $draft_file_id ), "second file\n" );
+	$set_file( $change_id, 'content/review.txt', "second file\n" );
 	$assert( $second_source === Blueprint_Registry_Workflow::source( $change_id ), 'A contributor must keep editing while the earlier version is in the queue.' );
-	$assert( "first file\n" === file_get_contents( get_attached_file( $submission_one_file['attachment_id'] ) ), 'Editing the draft must not alter the earlier submitted file.' );
+	$assert( "first file\n" === Blueprint_Registry_Storage::read( $submission_one, $submission_one_file ), 'Editing the draft must not alter the earlier submitted file.' );
 	$assert( true === Blueprint_Registry_Workflow::submit( $change_id, $author_id ), 'A contributor must be able to submit a later version without leaving the queue.' );
 	$submission_two = $track_submission( $change_id );
 	$assert( $submission_two !== $submission_one && 'superseded' === get_post_meta( $submission_one, '_bp_status', true ), 'A later submission must replace the older queued version.' );
 	$assert( 'pending_review' === get_post_meta( $change_id, '_bp_status', true ), 'Submitting another version must keep the proposal in the reviewer queue.' );
 	$submission_two_file = Blueprint_Registry_Bundles::get_submission_files( $submission_two )[0];
-	$assert( "second file\n" === file_get_contents( get_attached_file( $submission_two_file['attachment_id'] ) ), 'The newer submitted version must include the current file contents.' );
+	$assert( "second file\n" === Blueprint_Registry_Storage::read( $submission_two, $submission_two_file ), 'The newer submitted version must include the current file contents.' );
 
 	$stale_review = Blueprint_Registry_Workflow::review( $change_id, 'approved', 1, '', $submission_one );
 	$assert( is_wp_error( $stale_review ) && 'blueprint_stale_submission' === $stale_review->get_error_code(), 'A reviewer cannot decide on a submitted version that was replaced.' );
@@ -216,7 +218,7 @@ try {
 	ob_start();
 	$admin->render_review_queue();
 	$queue = ob_get_clean();
-	$assert( str_contains( $queue, get_the_title( $change_id ) ) && str_contains( $queue, '>2<' ) && str_contains( $queue, 'Review submitted version' ), 'The wp-admin queue must show the latest submitted version.' );
+	$assert( str_contains( $queue, get_the_title( $change_id ) ) && str_contains( $queue, '>2</td>' ) && str_contains( $queue, esc_url( Blueprint_Registry_Admin::review_url( $change_id ) ) ), 'The wp-admin queue must show the latest submitted version and link to its review screen.' );
 	ob_start();
 	$admin->render_source_box( get_post( $change_id ) );
 	$review_source = ob_get_clean();
@@ -224,7 +226,7 @@ try {
 
 	wp_set_current_user( $author_id );
 	Blueprint_Registry_Workflow::set_source( $change_id, $source_for( $title, 'working copy only' ) );
-	file_put_contents( get_attached_file( $draft_file_id ), "working file only\n" );
+	$set_file( $change_id, 'content/review.txt', "working file only\n" );
 	wp_set_current_user( 1 );
 	ob_start();
 	$admin->render_source_box( get_post( $change_id ) );
@@ -233,8 +235,14 @@ try {
 	ob_start();
 	$admin->render_files_box( get_post( $change_id ) );
 	$review_files = ob_get_clean();
-	$assert( str_contains( $review_files, get_the_title( $submission_two_file['attachment_id'] ) ), 'The reviewer file panel must show submitted file copies.' );
+	$assert( str_contains( $review_files, $submission_two_file['path'] ), 'The reviewer file panel must show submitted file copies.' );
 	$assert( str_contains( $review_files, 'action=bp_bundle_file' ) && str_contains( $review_files, 'download=1' ), 'Reviewer bundle files must have open and download links.' );
+	$assert(
+		str_contains( $review_files, 'submission_id=' . $submission_two )
+		&& str_contains( $review_files, 'key=' . $submission_two_file['key'] )
+		&& ! str_contains( $review_files, 'attachment_id=' ),
+		'Reviewer file links must address the submitted private file by its storage key.'
+	);
 
 	$missing_message = Blueprint_Registry_Workflow::review( $change_id, 'changes_requested', 1, '', $submission_two );
 	$assert( is_wp_error( $missing_message ) && 'blueprint_review_note_required' === $missing_message->get_error_code(), 'Returned proposals require a reviewer message.' );
@@ -249,13 +257,13 @@ try {
 	wp_set_current_user( $author_id );
 	$third_source = $source_for( $title, 'third submitted version' );
 	Blueprint_Registry_Workflow::set_source( $change_id, $third_source );
-	file_put_contents( get_attached_file( $draft_file_id ), "third file\n" );
+	$set_file( $change_id, 'content/review.txt', "third file\n" );
 	$assert( true === Blueprint_Registry_Workflow::submit( $change_id, $author_id ), 'A returned proposal must be resubmittable.' );
 	$submission_three = $track_submission( $change_id );
 	$assert( $submission_three !== $submission_two && 'superseded' === get_post_meta( $submission_two, '_bp_status', true ), 'Resubmitting after feedback must create another fixed version.' );
 	$submission_three_file = Blueprint_Registry_Bundles::get_submission_files( $submission_three )[0];
 	Blueprint_Registry_Workflow::set_source( $change_id, $source_for( $title, 'later working copy' ) );
-	file_put_contents( get_attached_file( $draft_file_id ), "later working file\n" );
+	$set_file( $change_id, 'content/review.txt', "later working file\n" );
 
 	wp_set_current_user( 1 );
 	$release_id = Blueprint_Registry_Workflow::review( $change_id, 'approved', 1, 'Ready to publish.', $submission_three );
@@ -271,10 +279,9 @@ try {
 	$assert( $follow_up_id && 'draft' === get_post_meta( $follow_up_id, '_bp_status', true ), 'Later draft work must remain available as a new draft after acceptance.' );
 	$created_posts[] = $follow_up_id;
 	foreach ( Blueprint_Registry_Bundles::get_change_files( $follow_up_id ) as $file ) {
-		$created_attachments[] = (int) $file['attachment_id'];
 	}
 	$assert( str_contains( Blueprint_Registry_Workflow::source( $follow_up_id ), 'later working copy' ), 'The follow-up draft must retain later JSON edits.' );
-	$assert( "later working file\n" === file_get_contents( get_attached_file( Blueprint_Registry_Bundles::get_change_files( $follow_up_id )[0]['attachment_id'] ) ), 'The follow-up draft must retain later file edits.' );
+	$assert( "later working file\n" === Blueprint_Registry_Storage::read( $follow_up_id, Blueprint_Registry_Bundles::get_change_files( $follow_up_id )[0] ), 'The follow-up draft must retain later file edits.' );
 	$assert( $release_id === (int) get_post_meta( $follow_up_id, '_bp_base_release_id', true ), 'The follow-up draft must start from the newly accepted release.' );
 
 	wp_set_current_user( $author_id );
@@ -284,15 +291,22 @@ try {
 		array( 'bp_blueprint_json' => Blueprint_Registry_Workflow::source( $follow_up_id ) )
 	);
 	$assert( str_contains( $review_redirect, '/blueprints/manage/' . $follow_up_id . '/review/' ), 'The editor must save an update and open its pre-submit review step.' );
-	$submission_redirect = $submit_frontend_form( 'submit', $follow_up_id );
-	$assert( str_contains( $submission_redirect, '/blueprints/manage/' . $follow_up_id . '/' ) && str_contains( $submission_redirect, 'bp_notice=success' ), 'The pre-submit review step must submit the update while keeping the editor available.' );
+	$render_review = new ReflectionMethod( Blueprint_Registry_Frontend::class, 'render_submission_review' );
+	$render_review->setAccessible( true );
+	ob_start();
+	$render_review->invoke( null, $follow_up_id );
+	$review_html = ob_get_clean();
+	preg_match( '/name="bp_reviewed_content" value="([^"]+)"/', $review_html, $reviewed_content );
+	$assert( ! empty( $reviewed_content[1] ), 'The review screen must identify the contents being confirmed.' );
+	$submission_redirect = $submit_frontend_form( 'submit', $follow_up_id, array( 'bp_reviewed_content' => $reviewed_content[1] ) );
+	$assert( str_contains( $submission_redirect, '/blueprints/manage/' . $follow_up_id . '/' ) && ! str_contains( $submission_redirect, 'bp_notice=error' ) && ! str_contains( $submission_redirect, '/review/' ), 'The pre-submit review step must submit the update while keeping the editor available.' );
 	$assert( 'pending_review' === get_post_meta( $follow_up_id, '_bp_status', true ), 'The confirmed review step must place the fixed version in the queue.' );
 	$follow_up_submission = $track_submission( $follow_up_id );
 	wp_set_current_user( 1 );
 	ob_start();
 	$admin->render_details_box( get_post( $follow_up_id ) );
 	$review_details = ob_get_clean();
-	$assert( str_contains( $review_details, 'Pending review' ) && str_contains( $review_details, 'Release 1' ) && ! str_contains( $review_details, '>' . $release_id . '<' ), 'Reviewer details must use the shared status label and a release number rather than an internal post ID.' );
+	$assert( str_contains( $review_details, 'In review' ) && str_contains( $review_details, 'Revision 1' ) && ! str_contains( $review_details, '>' . $release_id . '<' ), 'Reviewer details must use the shared status label and a revision number rather than an internal post ID.' );
 	$assert( is_wp_error( Blueprint_Registry_Workflow::submit( $change_id, $author_id ) ), 'An accepted proposal must not re-enter the queue.' );
 
 	$rejected_change = $create_change( 'Rejected workflow ' . wp_generate_password( 8, false ) );

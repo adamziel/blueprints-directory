@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blueprint Registry
  * Description: Reviewable WordPress Playground Blueprints with immutable published releases.
- * Version: 0.3.12
+ * Version: 0.4.0
  * Requires at least: 6.6
  * Requires PHP: 8.1
  * License: GPL-2.0-or-later
@@ -14,7 +14,7 @@ defined( 'ABSPATH' ) || exit;
 define( 'BLUEPRINT_REGISTRY_FILE', __FILE__ );
 define( 'BLUEPRINT_REGISTRY_DIR', plugin_dir_path( __FILE__ ) );
 define( 'BLUEPRINT_REGISTRY_URL', plugin_dir_url( __FILE__ ) );
-define( 'BLUEPRINT_REGISTRY_VERSION', '0.3.12' );
+define( 'BLUEPRINT_REGISTRY_VERSION', '0.4.0' );
 
 spl_autoload_register(
 	static function ( $class ) {

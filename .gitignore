@@ -1,3 +1,9 @@
 outputs/
 work/
 *.mp4
+.shots/node_modules/
+.shots/package-lock.json
+.shots/before/
+.shots/after/
+.shots/video/
+wp-content/plugins/blueprint-registry/.export/

@@ -51,4 +51,17 @@ final class Blueprint_Registry_Capabilities {
 	public static function can_review() {
 		return current_user_can( 'review_blueprints' );
 	}
+
+	/**
+	 * Whether the current user may start an update to a published Blueprint.
+	 *
+	 * Its author, and anyone who reviews. Everyone else forks instead.
+	 */
+	public static function can_edit_blueprint( $blueprint_id ) {
+		if ( ! self::can_contribute() ) {
+			return false;
+		}
+
+		return (int) get_post_field( 'post_author', $blueprint_id ) === get_current_user_id() || self::can_review();
+	}
 }

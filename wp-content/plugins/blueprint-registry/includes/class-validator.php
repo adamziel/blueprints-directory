@@ -8,7 +8,7 @@ final class Blueprint_Registry_Validator {
 	public static function validate_change( $change_id ) {
 		$source = Blueprint_Registry_Workflow::source( $change_id );
 		$files  = Blueprint_Registry_Bundles::get_change_files( $change_id );
-		$errors = self::validate( $source, $files );
+		$errors = self::validate( $source, $files, $change_id );
 
 		update_post_meta( $change_id, '_bp_validation_errors', $errors );
 		update_post_meta( $change_id, '_bp_validated_at', time() );
@@ -16,7 +16,11 @@ final class Blueprint_Registry_Validator {
 		return $errors;
 	}
 
-	public static function validate( $source, array $files ) {
+	/**
+	 * @param int $owner_id Post the files are stored against, so their presence
+	 *                      on disk can be checked. Zero skips that check.
+	 */
+	public static function validate( $source, array $files, $owner_id = 0 ) {
 		$errors = array();
 		$data   = json_decode( $source, true );
 
@@ -46,8 +50,8 @@ final class Blueprint_Registry_Validator {
 
 		$file_paths = array();
 		foreach ( $files as $file ) {
-			if ( empty( $file['path'] ) || empty( $file['attachment_id'] ) ) {
-				$errors[] = __( 'Each bundle file needs a path and attachment.', 'blueprint-registry' );
+			if ( empty( $file['path'] ) || empty( $file['key'] ) ) {
+				$errors[] = __( 'Each bundle file needs a path and stored contents.', 'blueprint-registry' );
 				continue;
 			}
 
@@ -62,8 +66,11 @@ final class Blueprint_Registry_Validator {
 			}
 			$file_paths[ $path ] = true;
 
-			if ( ! get_attached_file( (int) $file['attachment_id'] ) || ! file_exists( get_attached_file( (int) $file['attachment_id'] ) ) ) {
-				$errors[] = sprintf( __( 'The file at %s is no longer available.', 'blueprint-registry' ), $path );
+			if ( $owner_id ) {
+				$disk = Blueprint_Registry_Storage::file_path( $owner_id, $file['key'] );
+				if ( is_wp_error( $disk ) || ! file_exists( $disk ) ) {
+					$errors[] = sprintf( __( 'The file at %s is no longer available.', 'blueprint-registry' ), $path );
+				}
 			}
 		}
 

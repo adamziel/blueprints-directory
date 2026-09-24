@@ -13,7 +13,7 @@ final class Blueprint_Registry_Workflow {
 
 	public static function set_source( $change_id, $source ) {
 		$source = (string) $source;
-		update_post_meta( $change_id, '_bp_blueprint_json', $source );
+		update_post_meta( $change_id, '_bp_blueprint_json', wp_slash( $source ) );
 		$change = get_post( $change_id );
 		if ( ! $change ) {
 			return;
@@ -240,6 +240,35 @@ final class Blueprint_Registry_Workflow {
 		return $release;
 	}
 
+	/**
+	 * Counts proposals waiting in the review queue.
+	 */
+	public static function pending_review_count() {
+		$changes = get_posts(
+			array(
+				'post_type'      => 'blueprint_change',
+				'post_status'    => 'draft',
+				'posts_per_page' => 100,
+				'fields'         => 'ids',
+				'meta_query'     => array(
+					array(
+						'key'   => '_bp_status',
+						'value' => 'pending_review',
+					),
+				),
+			)
+		);
+
+		return count(
+			array_filter(
+				$changes,
+				static function ( $change_id ) {
+					return self::current_submission_id( $change_id );
+				}
+			)
+		);
+	}
+
 	public static function review_messages( $change_id ) {
 		return get_comments(
 			array(
@@ -274,7 +303,7 @@ final class Blueprint_Registry_Workflow {
 				'post_type'    => 'blueprint_submission',
 				'post_status'  => 'private',
 				'post_title'   => sprintf( '%s — submitted version %d', get_the_title( $change_id ), $submission_number ),
-				'post_content' => $source,
+				'post_content' => wp_slash( $source ),
 				'post_parent'  => $change_id,
 				'post_author'  => (int) get_post_field( 'post_author', $change_id ),
 			),
@@ -312,10 +341,10 @@ final class Blueprint_Registry_Workflow {
 
 		$user_id = $user_id ?: get_current_user_id();
 		if ( (int) $change->post_author !== (int) $user_id ) {
-			return new WP_Error( 'blueprint_forbidden', __( 'You cannot update the base release for this proposal.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_forbidden', __( 'You cannot update the base revision for this proposal.', 'blueprint-registry' ) );
 		}
 		if ( 'changes_requested' !== self::status( $change_id ) ) {
-			return new WP_Error( 'blueprint_not_refreshable', __( 'Only a proposal returned for changes can use a newer base release.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_not_refreshable', __( 'Only a proposal returned for changes can use a newer base revision.', 'blueprint-registry' ) );
 		}
 
 		$target_id = (int) get_post_meta( $change_id, '_bp_target_blueprint_id', true );
@@ -325,7 +354,7 @@ final class Blueprint_Registry_Workflow {
 			return new WP_Error( 'blueprint_missing_target', __( 'This proposal has no published Blueprint to update.', 'blueprint-registry' ) );
 		}
 		if ( $base_id === $current_id ) {
-			return new WP_Error( 'blueprint_current_base', __( 'This proposal already uses the current release as its base.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_current_base', __( 'This proposal already uses the current revision as its base.', 'blueprint-registry' ) );
 		}
 
 		update_post_meta( $change_id, '_bp_base_release_id', $current_id );
@@ -373,15 +402,24 @@ final class Blueprint_Registry_Workflow {
 
 	/**
 	 * Makes an accepted proposal point at the exact submitted version that
-	 * became public. Draft attachments are no longer needed after their copies
+	 * became public. Draft file copies are no longer needed after their copies
 	 * have either been released or moved to a follow-up draft.
 	 */
 	private static function finalize_accepted_change( $change_id, $submission_id ) {
 		$draft_files = Blueprint_Registry_Bundles::get_change_files( $change_id );
 		self::set_source( $change_id, (string) get_post_field( 'post_content', $submission_id ) );
-		update_post_meta( $change_id, '_bp_change_files', Blueprint_Registry_Bundles::get_submission_files( $submission_id ) );
+
+		$adopted = array();
+		foreach ( Blueprint_Registry_Bundles::get_submission_files( $submission_id ) as $file ) {
+			$copied = Blueprint_Registry_Storage::copy( $submission_id, $file, $change_id, $adopted );
+			if ( ! is_wp_error( $copied ) ) {
+				$adopted[] = $copied;
+			}
+		}
+		update_post_meta( $change_id, '_bp_change_files', $adopted );
+
 		foreach ( $draft_files as $file ) {
-			wp_delete_attachment( (int) $file['attachment_id'], true );
+			Blueprint_Registry_Storage::delete( $change_id, $file );
 		}
 	}
 
@@ -395,7 +433,7 @@ final class Blueprint_Registry_Workflow {
 		if ( $target_id ) {
 			$current_id = (int) get_post_meta( $target_id, '_bp_current_release_id', true );
 			if ( $current_id !== $base_id ) {
-				return new WP_Error( 'blueprint_stale_change', __( 'A newer release exists. Refresh this proposal before approval.', 'blueprint-registry' ) );
+				return new WP_Error( 'blueprint_stale_change', __( 'A newer revision exists. Refresh this proposal before approval.', 'blueprint-registry' ) );
 			}
 			$target_update = array( 'ID' => $target_id );
 			if ( isset( $presentation['title'] ) ) {
@@ -460,7 +498,7 @@ final class Blueprint_Registry_Workflow {
 			return $release_id;
 		}
 
-		$bundle_id = Blueprint_Registry_Bundles::build_release_bundle( $release_id, $source, $files );
+		$bundle_id = Blueprint_Registry_Bundles::build_release_bundle( $release_id, $source, $files, $submission_id );
 		if ( is_wp_error( $bundle_id ) ) {
 			wp_delete_post( $release_id, true );
 			if ( $created_target ) {

@@ -1,0 +1,113 @@
+/**
+ * Blueprint Registry screens inside wp-admin.
+ *
+ * The admin already owns the page chrome, so this only has to make the plugin's
+ * own components sit correctly inside `.wrap` and read against the admin's
+ * lighter grey background.
+ */
+
+.bp-admin {
+	max-width: 1400px;
+	margin-right: 20px;
+	color: var(--bp-ink);
+	font-family: var(--bp-font);
+	font-size: 14px;
+	line-height: 1.55;
+}
+
+.bp-admin * {
+	box-sizing: border-box;
+}
+
+.bp-admin .bp-page-head {
+	margin: 1.25rem 0 1.5rem;
+}
+
+.bp-admin .bp-page-head h1 {
+	padding: 0;
+	margin: 0;
+	color: var(--bp-ink);
+	font-size: 1.5rem;
+	font-weight: 680;
+	letter-spacing: -.022em;
+	line-height: 1.15;
+}
+
+.bp-admin .bp-back {
+	margin-top: 1rem;
+}
+
+.bp-admin a {
+	box-shadow: none;
+}
+
+.bp-admin a:focus-visible {
+	outline: 2px solid var(--bp-accent);
+	outline-offset: 3px;
+}
+
+.bp-admin .bp-btn:focus-visible,
+.bp-admin .bp-input:focus {
+	box-shadow: var(--bp-ring);
+}
+
+/* Reviewer layout: the comparison beside a sticky decision column. */
+.bp-review {
+	display: grid;
+	gap: 1.25rem;
+	align-items: start;
+	grid-template-columns: minmax(0, 1fr) 20rem;
+}
+
+.bp-review__main {
+	min-width: 0;
+}
+
+.bp-review__aside {
+	position: sticky;
+	top: 46px;
+	display: grid;
+	gap: 1.25rem;
+}
+
+.bp-decision__actions {
+	display: grid;
+	gap: .5rem;
+	margin-bottom: .75rem;
+}
+
+.bp-decision__actions .bp-btn {
+	width: 100%;
+	min-height: 2.5rem;
+}
+
+textarea.bp-decision__note {
+	min-height: 7rem;
+	max-height: 18rem;
+	font-family: var(--bp-font);
+	font-size: .875rem;
+	resize: vertical;
+}
+
+/* The post editor is no longer the review surface, but it stays reachable —
+   keep its meta boxes legible with the same components. */
+body.post-type-blueprint_change #bp_blueprint_diff .inside,
+body.post-type-blueprint_change #bp_change_files .inside {
+	padding: 0;
+	margin: 0;
+}
+
+body.post-type-blueprint_change .bp-panel {
+	border: 0;
+	box-shadow: none;
+}
+
+@media (max-width: 1200px) {
+	.bp-review {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.bp-review__aside {
+		position: static;
+	}
+}

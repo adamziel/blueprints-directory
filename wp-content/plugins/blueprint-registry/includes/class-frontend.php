@@ -46,24 +46,8 @@ final class Blueprint_Registry_Frontend {
 			return;
 		}
 
-		wp_enqueue_style( 'blueprint-registry-gallery', BLUEPRINT_REGISTRY_URL . 'assets/gallery.css', array(), BLUEPRINT_REGISTRY_VERSION );
-		wp_enqueue_style( 'blueprint-registry-management', BLUEPRINT_REGISTRY_URL . 'assets/management.css', array(), BLUEPRINT_REGISTRY_VERSION );
-
-		if ( ! in_array( get_query_var( 'bp_manage' ), array( 'edit', 'edit_new' ), true ) ) {
-			return;
-		}
-
-		if ( ! function_exists( 'wp_enqueue_code_editor' ) ) {
-			require_once ABSPATH . 'wp-admin/includes/misc.php';
-		}
-
-		$settings = wp_enqueue_code_editor( array( 'type' => 'application/json', 'codemirror' => array( 'indentUnit' => 2, 'tabSize' => 2 ) ) );
-		if ( false === $settings ) {
-			return;
-		}
-
-		wp_enqueue_script( 'blueprint-registry-editor', BLUEPRINT_REGISTRY_URL . 'assets/editor.js', array( 'code-editor', 'wp-i18n' ), BLUEPRINT_REGISTRY_VERSION, true );
-		wp_add_inline_script( 'blueprint-registry-editor', 'window.BlueprintRegistryEditor = ' . wp_json_encode( $settings ) . ';', 'before' );
+		Blueprint_Registry_Assets::enqueue_workspace();
+		Blueprint_Registry_Assets::enqueue_code_editor();
 	}
 
 	public function redirect_contributors_from_admin() {
@@ -87,6 +71,24 @@ final class Blueprint_Registry_Frontend {
 		if ( 'review' === get_query_var( 'bp_manage' ) ) {
 			wp_safe_redirect( Blueprint_Registry_Capabilities::can_review() ? Blueprint_Registry_Admin::review_queue_url() : self::dashboard_url() );
 			exit;
+		}
+
+		if ( 'edit_new' === get_query_var( 'bp_manage' ) && 'update' === get_query_var( 'bp_new_mode' ) && (int) get_query_var( 'bp_source_blueprint_id' ) && is_user_logged_in() && 'GET' === strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
+			$changes = get_posts( array(
+				'post_type' => 'blueprint_change',
+				'post_status' => 'draft',
+				'author' => get_current_user_id(),
+				'posts_per_page' => 1,
+				'orderby' => array( 'modified' => 'DESC', 'ID' => 'DESC' ),
+				'meta_query' => array(
+					array( 'key' => '_bp_target_blueprint_id', 'value' => (int) get_query_var( 'bp_source_blueprint_id' ) ),
+					array( 'key' => '_bp_status', 'value' => array( 'draft', 'pending_review', 'changes_requested' ), 'compare' => 'IN' ),
+				),
+			) );
+			if ( $changes ) {
+				wp_safe_redirect( self::edit_url( $changes[0]->ID ) );
+				exit;
+			}
 		}
 
 		if ( ! self::is_management_page() || empty( $_REQUEST['bp_action'] ) ) {
@@ -151,27 +153,56 @@ final class Blueprint_Registry_Frontend {
 	}
 
 	public static function render_page() {
-		get_header();
+		// Redirect completed comparisons before the document shell sends headers.
+		if ( 'submission_review' === get_query_var( 'bp_manage' ) ) {
+			$change = get_post( (int) get_query_var( 'bp_change_id' ) );
+			if ( self::can_edit_change( $change ) && in_array( self::change_status( $change->ID ), array( 'accepted', 'rejected' ), true ) ) {
+				wp_safe_redirect( self::edit_url( $change->ID ) );
+				exit;
+			}
+		}
+		Blueprint_Registry_Ui::open( 'bp-screen-workspace' );
+		echo '<main class="bp-app__main" id="main-content">';
+
+		if ( ! Blueprint_Registry_Capabilities::can_contribute() ) {
+			self::render_signed_out();
+		} else {
+			switch ( get_query_var( 'bp_manage' ) ) {
+				case 'edit_new':
+					self::render_new_editor();
+					break;
+				case 'edit':
+					self::render_editor( (int) get_query_var( 'bp_change_id' ) );
+					break;
+				case 'submission_review':
+					self::render_submission_review( (int) get_query_var( 'bp_change_id' ) );
+					break;
+				default:
+					self::render_dashboard();
+			}
+		}
+
+		echo '</main>';
+		Blueprint_Registry_Ui::close();
+	}
+
+	private static function render_signed_out() {
 		?>
-		<main class="bp-manage" id="main-content">
-			<?php if ( ! Blueprint_Registry_Capabilities::can_contribute() ) : ?>
-				<section class="bp-manage__panel bp-manage__empty">
-					<h1><?php esc_html_e( 'Manage Blueprints', 'blueprint-registry' ); ?></h1>
-					<p><?php esc_html_e( 'Sign in with your WordPress.org account to create, fork, or update a Blueprint.', 'blueprint-registry' ); ?></p>
-					<p><a class="bp-manage__button bp-manage__button--primary" href="<?php echo esc_url( wp_login_url( self::current_url() ) ); ?>"><?php esc_html_e( 'Sign in', 'blueprint-registry' ); ?></a></p>
-				</section>
-			<?php elseif ( 'edit_new' === get_query_var( 'bp_manage' ) ) : ?>
-				<?php self::render_new_editor(); ?>
-			<?php elseif ( 'edit' === get_query_var( 'bp_manage' ) ) : ?>
-				<?php self::render_editor( (int) get_query_var( 'bp_change_id' ) ); ?>
-			<?php elseif ( 'submission_review' === get_query_var( 'bp_manage' ) ) : ?>
-				<?php self::render_submission_review( (int) get_query_var( 'bp_change_id' ) ); ?>
-			<?php else : ?>
-				<?php self::render_dashboard(); ?>
-			<?php endif; ?>
-		</main>
+		<div class="bp-panel">
+			<?php
+			Blueprint_Registry_Ui::empty_state(
+				'fork',
+				__( 'Sign in to contribute', 'blueprint-registry' ),
+				__( 'Sign in to create a Blueprint or make your own copy of one from the gallery.', 'blueprint-registry' ),
+				sprintf(
+					'<a class="bp-btn bp-btn--primary" href="%s">%s</a>',
+					esc_url( wp_login_url( self::current_url() ) ),
+					esc_html__( 'Sign in', 'blueprint-registry' )
+				)
+			);
+			?>
+		</div>
 		<?php
-		get_footer();
 	}
 
 	private function create_change() {
@@ -189,8 +220,8 @@ final class Blueprint_Registry_Frontend {
 		if ( ! $blueprint || 'blueprint' !== $blueprint->post_type || 'publish' !== $blueprint->post_status || ! in_array( $mode, array( 'fork', 'update' ), true ) ) {
 			$this->redirect_result( new WP_Error( 'blueprint_missing_source', __( 'That published Blueprint is not available.', 'blueprint-registry' ) ), self::dashboard_url() );
 		}
-		if ( 'update' === $mode && (int) $blueprint->post_author !== get_current_user_id() ) {
-			$this->redirect_result( new WP_Error( 'blueprint_forbidden', __( 'Only the Blueprint author can edit it.', 'blueprint-registry' ) ), self::dashboard_url() );
+		if ( 'update' === $mode && ! Blueprint_Registry_Capabilities::can_edit_blueprint( $blueprint_id ) ) {
+			$this->redirect_result( new WP_Error( 'blueprint_forbidden', __( 'Only the Blueprint author or a reviewer can edit it.', 'blueprint-registry' ) ), self::dashboard_url() );
 		}
 		wp_safe_redirect( self::new_editor_url( $blueprint_id, $mode ) );
 		exit;
@@ -228,12 +259,17 @@ final class Blueprint_Registry_Frontend {
 			Blueprint_Registry_Workflow::set_source( $change, wp_unslash( $_POST['bp_blueprint_json'] ) );
 		}
 		Blueprint_Registry_Admin::save_uploaded_file( $change );
+		$upload_error = get_post_meta( $change, '_bp_upload_error', true );
+		if ( $upload_error ) {
+			$this->redirect_result( new WP_Error( 'blueprint_upload_failed', $upload_error ), self::edit_url( $change ) );
+		}
 		$errors = Blueprint_Registry_Validator::validate_change( $change );
 		if ( $errors ) {
 			$this->redirect_result( new WP_Error( 'blueprint_invalid_change', __( 'Fix the validation errors before reviewing this Blueprint.', 'blueprint-registry' ) ), self::edit_url( $change ) );
 		}
 
-		$this->redirect_result( true, self::edit_url( $change ), self::submission_review_url( $change ) );
+		wp_safe_redirect( self::submission_review_url( $change ) );
+		exit;
 	}
 
 	private function delete_draft() {
@@ -245,7 +281,7 @@ final class Blueprint_Registry_Frontend {
 		}
 
 		foreach ( Blueprint_Registry_Bundles::get_change_files( $change->ID ) as $file ) {
-			wp_delete_attachment( (int) $file['attachment_id'], true );
+			Blueprint_Registry_Storage::delete( $change->ID, $file );
 		}
 		wp_delete_post( $change->ID, true );
 		$this->redirect_result( true, self::dashboard_url(), null, __( 'Blueprint draft removed.', 'blueprint-registry' ) );
@@ -260,18 +296,33 @@ final class Blueprint_Registry_Frontend {
 			$this->redirect_result( new WP_Error( 'blueprint_not_editable', __( 'This proposal can no longer be edited.', 'blueprint-registry' ) ), self::edit_url( $change->ID ) );
 		}
 
-		if ( isset( $_POST['bp_remove_file'] ) ) {
-			$this->remove_change_file( $change, (int) $_POST['bp_remove_file'] );
-		}
-
 		if ( isset( $_POST['bp_blueprint_json'] ) ) {
 			Blueprint_Registry_Workflow::set_source( $change->ID, wp_unslash( $_POST['bp_blueprint_json'] ) );
 		}
 
-		Blueprint_Registry_Admin::save_uploaded_file( $change->ID );
-		Blueprint_Registry_Validator::validate_change( $change->ID );
+		if ( isset( $_POST['bp_remove_file'] ) ) {
+			$removed = $this->remove_change_file( $change, sanitize_text_field( wp_unslash( $_POST['bp_remove_file'] ) ) );
+			if ( is_wp_error( $removed ) ) {
+				$this->redirect_result( $removed, self::edit_url( $change->ID ) );
+			}
+		}
+
+		if ( isset( $_POST['bp_discard_upload'] ) ) {
+			delete_post_meta( $change->ID, '_bp_upload_error' );
+		} else {
+			Blueprint_Registry_Admin::save_uploaded_file( $change->ID );
+		}
+		$errors = Blueprint_Registry_Validator::validate_change( $change->ID );
+		$upload_error = get_post_meta( $change->ID, '_bp_upload_error', true );
+		if ( $upload_error || ( $continue_to_review && $errors ) ) {
+			$this->redirect_result( new WP_Error( 'blueprint_invalid_change', $upload_error ?: __( 'Changes saved. Fix the problems below to continue.', 'blueprint-registry' ) ), self::edit_url( $change->ID ) );
+		}
+		if ( isset( $_POST['bp_remove_file'] ) ) {
+			$this->redirect_result( true, self::edit_url( $change->ID ), null, __( 'Changes saved. Bundle file removed.', 'blueprint-registry' ) );
+		}
 		if ( $continue_to_review ) {
-			$this->redirect_result( true, self::edit_url( $change->ID ), self::submission_review_url( $change->ID ) );
+			wp_safe_redirect( self::submission_review_url( $change->ID ) );
+			exit;
 		}
 		$this->redirect_result( true, self::edit_url( $change->ID ), null, __( 'Changes saved.', 'blueprint-registry' ) );
 	}
@@ -280,13 +331,29 @@ final class Blueprint_Registry_Frontend {
 		$this->require_post();
 		$change = $this->change_from_request();
 		check_admin_referer( 'bp_front_submit_' . $change->ID );
-		$this->redirect_result( Blueprint_Registry_Workflow::submit( $change->ID ), self::edit_url( $change->ID ), self::edit_url( $change->ID ), __( 'Changes submitted for review.', 'blueprint-registry' ) );
+		// A second tab may have changed the draft since this comparison was opened.
+		$reviewed = isset( $_POST['bp_reviewed_content'] ) ? sanitize_text_field( wp_unslash( $_POST['bp_reviewed_content'] ) ) : '';
+		if ( ! hash_equals( self::review_fingerprint( $change->ID ), $reviewed ) ) {
+			$this->redirect_result( new WP_Error( 'blueprint_review_changed', __( 'This draft changed in another tab. Check the updated contents before submitting.', 'blueprint-registry' ) ), self::submission_review_url( $change->ID ) );
+		}
+		if ( get_post_meta( $change->ID, '_bp_upload_error', true ) ) {
+			$this->redirect_result( new WP_Error( 'blueprint_upload_failed', __( 'Resolve the file upload error before submitting.', 'blueprint-registry' ) ), self::edit_url( $change->ID ) );
+		}
+		$result = Blueprint_Registry_Workflow::submit( $change->ID );
+		if ( is_wp_error( $result ) ) {
+			$this->redirect_result( $result, self::edit_url( $change->ID ) );
+		}
+		wp_safe_redirect( self::edit_url( $change->ID ) );
+		exit;
 	}
 
 	private function preview_change() {
 		$this->require_post();
 		$change = $this->change_from_request();
 		check_admin_referer( 'bp_front_preview_' . $change->ID );
+		if ( isset( $_POST['bp_reviewed_content'] ) && ! hash_equals( self::review_fingerprint( $change->ID ), sanitize_text_field( wp_unslash( $_POST['bp_reviewed_content'] ) ) ) ) {
+			$this->redirect_result( new WP_Error( 'blueprint_preview_changed', __( 'This draft changed in another tab. Check the updated contents before running a preview.', 'blueprint-registry' ) ), self::submission_review_url( $change->ID ) );
+		}
 		$token = Blueprint_Registry_Bundles::build_preview( $change->ID );
 		if ( is_wp_error( $token ) ) {
 			$this->redirect_result( $token, self::edit_url( $change->ID ) );
@@ -302,19 +369,17 @@ final class Blueprint_Registry_Frontend {
 		$change = $this->change_from_request();
 		check_admin_referer( 'bp_front_refresh_base_' . $change->ID );
 		$result = Blueprint_Registry_Workflow::refresh_base_release( $change->ID );
-		$this->redirect_result( $result, self::edit_url( $change->ID ), null, __( 'The proposal now compares with the current release. Review the diff before submitting again.', 'blueprint-registry' ) );
+		$this->redirect_result( $result, self::submission_review_url( $change->ID ), null, __( 'The proposal now compares with the current revision. Review the diff before submitting again.', 'blueprint-registry' ) );
 	}
 
-	private function remove_change_file( $change, $attachment_id ) {
-		$attachment_ids = wp_list_pluck( Blueprint_Registry_Bundles::get_change_files( $change->ID ), 'attachment_id' );
-		if ( ! in_array( $attachment_id, array_map( 'intval', $attachment_ids ), true ) ) {
-			$this->redirect_result( new WP_Error( 'blueprint_missing_file', __( 'That bundle file does not belong to this draft.', 'blueprint-registry' ) ), self::edit_url( $change->ID ) );
+	private function remove_change_file( $change, $key ) {
+		$keys = wp_list_pluck( Blueprint_Registry_Bundles::get_change_files( $change->ID ), 'key' );
+		if ( ! in_array( (string) $key, array_map( 'strval', $keys ), true ) ) {
+			return new WP_Error( 'blueprint_missing_file', __( 'That bundle file does not belong to this draft.', 'blueprint-registry' ) );
 		}
 
-		Blueprint_Registry_Bundles::remove_change_file( $change->ID, $attachment_id );
-		wp_delete_attachment( $attachment_id, true );
-		Blueprint_Registry_Validator::validate_change( $change->ID );
-		$this->redirect_result( true, self::edit_url( $change->ID ), null, __( 'Bundle file removed.', 'blueprint-registry' ) );
+		Blueprint_Registry_Bundles::remove_change_file( $change->ID, $key );
+		return true;
 	}
 
 	private function change_from_request() {
@@ -361,42 +426,160 @@ final class Blueprint_Registry_Frontend {
 		if ( is_wp_error( $context ) ) {
 			wp_die( esc_html( $context->get_error_message() ), '', array( 'response' => 403 ) );
 		}
+
+		$source_id      = $context['source_blueprint_id'];
+		$release_id     = $source_id ? (int) get_post_meta( $source_id, '_bp_current_release_id', true ) : 0;
+		$release_number = $release_id ? (int) get_post_meta( $release_id, '_bp_release_number', true ) : 0;
+		$inherited      = array();
+
+		if ( $release_id ) {
+			$entries = Blueprint_Registry_Bundles::release_file_entries( $release_id );
+			foreach ( is_wp_error( $entries ) ? array() : $entries as $entry ) {
+				// blueprint.json is the editor's contents, not a bundle file.
+				if ( 'blueprint.json' === $entry['path'] ) {
+					continue;
+				}
+				$inherited[] = array(
+					'path' => $entry['path'],
+					'size' => (int) $entry['size'],
+					'url'  => Blueprint_Registry_Routes::release_file_url( $source_id, $release_number, $entry['path'] ),
+				);
+			}
+		}
+
+		$intro     = array(
+			'new'    => __( 'Edit the JSON, then check your changes before submitting.', 'blueprint-registry' ),
+			'fork'   => __( 'Your own copy. The original stays unchanged.', 'blueprint-registry' ),
+			'update' => __( 'Changes go through review. The published Blueprint stays unchanged.', 'blueprint-registry' ),
+		);
 		?>
-		<header class="bp-manage__header bp-manage__header--editor">
-			<div>
-				<p><a href="<?php echo esc_url( self::dashboard_url() ); ?>">&larr; <?php esc_html_e( 'My Blueprints', 'blueprint-registry' ); ?></a></p>
+		<a class="bp-back" href="<?php echo esc_url( $source_id ? get_permalink( $source_id ) : self::dashboard_url() ); ?>">
+			<?php echo Blueprint_Registry_Ui::icon( 'arrow-left' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+			<?php echo esc_html( $source_id ? get_the_title( $source_id ) : __( 'My work', 'blueprint-registry' ) ); ?>
+		</a>
+
+		<div class="bp-page-head">
+			<div class="bp-page-head__text">
 				<h1><?php echo esc_html( $context['heading'] ); ?></h1>
-			</div>
-		</header>
-		<?php if ( 'update' === $context['mode'] ) : ?>
-			<?php self::render_revision_history( $context['source_blueprint_id'] ); ?>
-		<?php endif; ?>
-		<form class="bp-manage__editor" method="post" action="<?php echo esc_url( self::new_editor_url( $context['source_blueprint_id'], $context['mode'] ) ); ?>" enctype="multipart/form-data">
-			<input type="hidden" name="bp_action" value="create_and_review">
-			<input type="hidden" name="bp_source_blueprint_id" value="<?php echo esc_attr( $context['source_blueprint_id'] ); ?>">
-			<input type="hidden" name="bp_new_mode" value="<?php echo esc_attr( $context['mode'] ); ?>">
-			<?php wp_nonce_field( 'bp_front_create_new_' . $context['source_blueprint_id'] . '_' . $context['mode'] ); ?>
-			<section class="bp-manage__panel">
-				<h2><?php esc_html_e( 'Blueprint JSON', 'blueprint-registry' ); ?></h2>
-				<p><?php esc_html_e( 'This editor is not saved until you review your changes.', 'blueprint-registry' ); ?></p>
-				<textarea id="bp_blueprint_json" name="bp_blueprint_json" rows="26"><?php echo esc_textarea( $context['source'] ); ?></textarea>
-			</section>
-			<section class="bp-manage__panel">
-				<h2><?php esc_html_e( 'Bundle files', 'blueprint-registry' ); ?></h2>
-				<?php if ( $context['source_blueprint_id'] ) : ?>
-					<p><?php esc_html_e( 'The existing bundle files are copied when you review this Blueprint. Upload a resource to add another.', 'blueprint-registry' ); ?></p>
-				<?php else : ?>
-					<p><?php esc_html_e( 'Upload one resource at a time. Its bundle path is relative to the ZIP root.', 'blueprint-registry' ); ?></p>
-				<?php endif; ?>
-				<div class="bp-manage__file-fields">
-					<p><label for="bp_bundle_file"><?php esc_html_e( 'File', 'blueprint-registry' ); ?></label><input type="file" id="bp_bundle_file" name="bp_bundle_file"></p>
-					<p><label for="bp_bundle_path"><?php esc_html_e( 'Bundle path', 'blueprint-registry' ); ?></label><input type="text" id="bp_bundle_path" name="bp_bundle_path" placeholder="content/demo.xml"></p>
+				<div class="bp-page-head__meta">
+					<?php if ( 'fork' === $context['mode'] ) : ?>
+						<span class="bp-chip bp-chip--fork"><?php esc_html_e( 'Fork', 'blueprint-registry' ); ?></span>
+					<?php elseif ( 'update' === $context['mode'] ) : ?>
+						<span class="bp-chip bp-chip--draft"><?php esc_html_e( 'Update', 'blueprint-registry' ); ?></span>
+					<?php else : ?>
+						<span class="bp-chip bp-chip--draft"><?php esc_html_e( 'New Blueprint', 'blueprint-registry' ); ?></span>
+					<?php endif; ?>
+					<span class="bp-panel__head-note"><?php echo esc_html( $intro[ $context['mode'] ] ); ?></span>
 				</div>
-			</section>
-			<div class="bp-manage__actions">
-				<button class="bp-manage__button bp-manage__button--primary" type="submit"><?php esc_html_e( 'Review changes', 'blueprint-registry' ); ?></button>
+			</div>
+			<div class="bp-page-head__actions">
+				<button class="bp-btn bp-btn--primary" type="submit" form="bp-new-editor">
+					<?php echo Blueprint_Registry_Ui::icon( 'diff' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+					<?php esc_html_e( 'Review changes', 'blueprint-registry' ); ?>
+				</button>
+			</div>
+		</div>
+
+		<?php Blueprint_Registry_Ui::notice(); ?>
+
+		<form id="bp-new-editor" class="bp-editor" method="post" action="<?php echo esc_url( self::new_editor_url( $source_id, $context['mode'] ) ); ?>" enctype="multipart/form-data">
+			<input type="hidden" name="bp_action" value="create_and_review">
+			<input type="hidden" name="bp_source_blueprint_id" value="<?php echo esc_attr( $source_id ); ?>">
+			<input type="hidden" name="bp_new_mode" value="<?php echo esc_attr( $context['mode'] ); ?>">
+			<?php wp_nonce_field( 'bp_front_create_new_' . $source_id . '_' . $context['mode'] ); ?>
+
+			<div class="bp-editor__aside">
+				<?php
+				self::render_upload_panel(
+					__( 'The path is relative to the bundle root.', 'blueprint-registry' ),
+					true,
+					0,
+					$inherited,
+					$release_number
+				);
+				?>
+				<?php if ( 'update' === $context['mode'] ) : ?>
+					<?php self::render_revision_history( $source_id ); ?>
+				<?php endif; ?>
+			</div>
+
+			<div class="bp-editor__slot">
+				<section class="bp-panel">
+					<div class="bp-panel__head">
+						<h2><?php esc_html_e( 'blueprint.json', 'blueprint-registry' ); ?></h2>
+						<span class="bp-panel__head-note" data-bp-save-state role="status"><?php esc_html_e( 'Changes are saved when you choose Review changes', 'blueprint-registry' ); ?></span>
+					</div>
+					<div class="bp-panel__body">
+						<label class="bp-visually-hidden" for="bp_blueprint_json"><?php esc_html_e( 'Blueprint JSON', 'blueprint-registry' ); ?></label>
+						<textarea class="bp-input" id="bp_blueprint_json" name="bp_blueprint_json" rows="26" spellcheck="false"><?php echo esc_textarea( $context['source'] ); ?></textarea>
+					</div>
+				</section>
 			</div>
 		</form>
+		<?php
+	}
+
+	/**
+	 * The bundle-file uploader, shared by the new and existing editors.
+	 */
+	private static function render_upload_panel( $hint, $editable, $change_id = 0, array $inherited = array(), $inherited_from = 0 ) {
+		$upload_error = $change_id ? get_post_meta( $change_id, '_bp_upload_error', true ) : '';
+		$count        = $change_id ? count( Blueprint_Registry_Bundles::get_change_files( $change_id ) ) : count( $inherited );
+		?>
+		<section class="bp-panel" id="bp-bundle-panel">
+			<div class="bp-panel__head">
+				<h2><?php esc_html_e( 'Bundle files', 'blueprint-registry' ); ?></h2>
+				<?php if ( $count ) : ?><span class="bp-panel__head-note"><?php echo esc_html( $count ); ?></span><?php endif; ?>
+			</div>
+			<?php if ( $change_id ) : ?>
+				<?php self::render_change_files( $change_id, $editable ); ?>
+			<?php elseif ( $inherited ) : ?>
+				<ul class="bp-bundle-list">
+					<?php foreach ( $inherited as $file ) : ?>
+						<li>
+							<?php echo Blueprint_Registry_Ui::icon( Blueprint_Registry_Ui::file_icon( $file['path'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+							<a class="bp-bundle-list__name" href="<?php echo esc_url( $file['url'] ); ?>" title="<?php echo esc_attr( $file['path'] ); ?>"><?php echo esc_html( $file['path'] ); ?></a>
+							<span class="bp-bundle-list__size"><?php echo esc_html( size_format( $file['size'] ) ); ?></span>
+						</li>
+					<?php endforeach; ?>
+				</ul>
+				<p class="bp-bundle-list__note">
+					<?php
+					echo esc_html(
+						$inherited_from
+							/* translators: %d: revision number the files come from. */
+							? sprintf( __( 'Included from revision %d. Review changes to save your copy.', 'blueprint-registry' ), $inherited_from )
+							: __( 'Carried over from the current revision.', 'blueprint-registry' )
+					);
+					?>
+				</p>
+			<?php endif; ?>
+			<?php if ( $editable ) : ?>
+				<div class="bp-panel__body">
+					<?php if ( $upload_error ) : ?>
+						<div class="bp-field">
+							<p class="bp-field__hint"><?php esc_html_e( 'Choose the files again to retry, or continue without this upload.', 'blueprint-registry' ); ?></p>
+							<button class="bp-btn bp-btn--sm" type="submit" name="bp_discard_upload" value="1"><?php esc_html_e( 'Continue without upload', 'blueprint-registry' ); ?></button>
+						</div>
+					<?php endif; ?>
+					<div class="bp-field">
+						<label class="bp-field__label" for="bp_bundle_source"><?php esc_html_e( 'Add files', 'blueprint-registry' ); ?></label>
+						<input class="bp-input" type="file" id="bp_bundle_source" multiple data-bp-bundle-source>
+						<input type="file" id="bp_bundle_file" name="bp_bundle_file" accept=".zip,application/zip" data-bp-bundle-archive hidden>
+						<p class="bp-field__hint" data-bp-bundle-status aria-live="polite"><?php esc_html_e( 'Any file type. Files are added when you review changes.', 'blueprint-registry' ); ?></p>
+					</div>
+					<details class="bp-upload-options">
+						<summary><?php esc_html_e( 'Choose a folder or filename', 'blueprint-registry' ); ?></summary>
+					<div class="bp-field">
+						<label class="bp-field__label" for="bp_bundle_path"><?php esc_html_e( 'Bundle path', 'blueprint-registry' ); ?></label>
+						<input class="bp-input" type="text" id="bp_bundle_path" name="bp_bundle_path" placeholder="content/demo.xml">
+						<p class="bp-field__hint"><?php echo esc_html( $hint ); ?> <?php esc_html_e( 'For several files, it is their shared folder.', 'blueprint-registry' ); ?></p>
+					</div>
+					</details>
+					<noscript><p class="bp-field__hint"><?php esc_html_e( 'Bundle uploads need JavaScript so the selected files can be packed into a ZIP.', 'blueprint-registry' ); ?></p></noscript>
+				</div>
+			<?php endif; ?>
+		</section>
 		<?php
 	}
 
@@ -421,13 +604,13 @@ final class Blueprint_Registry_Frontend {
 		if ( ! $blueprint || 'blueprint' !== $blueprint->post_type || 'publish' !== $blueprint->post_status || ! in_array( $mode, array( 'fork', 'update' ), true ) ) {
 			return new WP_Error( 'blueprint_missing_source', __( 'That published Blueprint is not available.', 'blueprint-registry' ) );
 		}
-		if ( 'update' === $mode && (int) $blueprint->post_author !== get_current_user_id() ) {
-			return new WP_Error( 'blueprint_forbidden', __( 'Only the Blueprint author can edit it.', 'blueprint-registry' ) );
+		if ( 'update' === $mode && ! Blueprint_Registry_Capabilities::can_edit_blueprint( $source_blueprint_id ) ) {
+			return new WP_Error( 'blueprint_forbidden', __( 'Only the Blueprint author or a reviewer can edit it.', 'blueprint-registry' ) );
 		}
 
 		$release_id = (int) get_post_meta( $source_blueprint_id, '_bp_current_release_id', true );
 		if ( ! $release_id ) {
-			return new WP_Error( 'blueprint_missing_release', __( 'This Blueprint has no published release to start from.', 'blueprint-registry' ) );
+			return new WP_Error( 'blueprint_missing_release', __( 'This Blueprint has no published revision to start from.', 'blueprint-registry' ) );
 		}
 
 		return array(
@@ -440,71 +623,205 @@ final class Blueprint_Registry_Frontend {
 	}
 
 	private static function render_dashboard() {
-		$items = self::dashboard_items( get_current_user_id() );
+		$items  = self::dashboard_items( get_current_user_id() );
+		$filter = isset( $_GET['bp_filter'] ) ? sanitize_key( wp_unslash( $_GET['bp_filter'] ) ) : 'all';
+		$rows   = array_map( array( __CLASS__, 'dashboard_row' ), $items );
+		$counts = array(
+			'all'       => count( $rows ),
+			'attention' => 0,
+			'review'    => 0,
+			'draft'     => 0,
+			'published' => 0,
+		);
+
+		foreach ( $rows as $row ) {
+			foreach ( $row['buckets'] as $bucket ) {
+				$counts[ $bucket ]++;
+			}
+		}
+
+		$visible = array_values(
+			array_filter(
+				$rows,
+				static function ( $row ) use ( $filter ) {
+					return 'all' === $filter || in_array( $filter, $row['buckets'], true );
+				}
+			)
+		);
+
+		$tabs = array(
+			'all'       => __( 'All', 'blueprint-registry' ),
+			'attention' => __( 'Needs your attention', 'blueprint-registry' ),
+			'review'    => __( 'In review', 'blueprint-registry' ),
+			'draft'     => __( 'Drafts', 'blueprint-registry' ),
+			'published' => __( 'Published', 'blueprint-registry' ),
+		);
 		?>
-		<header class="bp-manage__header">
-			<div>
-				<p class="bp-manage__eyebrow"><?php esc_html_e( 'WordPress Playground', 'blueprint-registry' ); ?></p>
-				<h1><?php esc_html_e( 'My Blueprints', 'blueprint-registry' ); ?></h1>
-				<p><?php esc_html_e( 'Create a Blueprint or continue working on a draft or review request.', 'blueprint-registry' ); ?></p>
+		<div class="bp-page-head">
+			<div class="bp-page-head__text">
+				<h1><?php esc_html_e( 'My work', 'blueprint-registry' ); ?></h1>
+				<p class="bp-page-head__sub"><?php esc_html_e( 'Your Blueprints, with the latest work on each one.', 'blueprint-registry' ); ?></p>
 			</div>
-			<a class="bp-manage__button bp-manage__button--primary bp-manage__create-form--button" href="<?php echo esc_url( self::new_editor_url() ); ?>"><?php esc_html_e( '+ New Blueprint', 'blueprint-registry' ); ?></a>
-		</header>
-		<?php self::render_notice(); ?>
-		<section class="bp-manage__section" aria-labelledby="bp-your-work">
-			<h2 id="bp-your-work"><?php esc_html_e( 'Your work', 'blueprint-registry' ); ?></h2>
-			<?php if ( $items ) : ?>
-				<div class="bp-gallery__grid bp-manage__grid">
-					<?php foreach ( $items as $item ) : ?>
-						<?php
-						$blueprint           = $item['blueprint'];
-						$change              = $item['change'];
-						$blueprint_id        = $blueprint ? $blueprint->ID : 0;
-						$change_type         = $change ? get_post_meta( $change->ID, '_bp_change_type', true ) ?: 'new' : '';
-						$status              = $change ? self::change_status( $change->ID ) : 'published';
-						$edit_url            = $change ? self::edit_url( $change->ID ) : self::new_editor_url( $blueprint_id, 'update' );
-						$thumbnail_id        = $blueprint_id ? get_post_thumbnail_id( $blueprint_id ) : get_post_thumbnail_id( $change->ID );
-						$presentation        = $change ? Blueprint_Registry_Workflow::presentation( Blueprint_Registry_Workflow::source( $change->ID ) ) : array( 'description' => (string) get_post_field( 'post_content', $blueprint_id ) );
-						$title               = $change ? get_the_title( $change ) : get_the_title( $blueprint );
-						$modified            = $change ?: $blueprint;
-						?>
-						<article class="bp-tile bp-manage__tile"<?php if ( $blueprint_id ) : ?> data-bp-blueprint-id="<?php echo esc_attr( $blueprint_id ); ?>"<?php endif; ?>>
-							<a class="bp-tile__image" href="<?php echo esc_url( $edit_url ); ?>" aria-label="<?php echo esc_attr( sprintf( __( 'Edit %s', 'blueprint-registry' ), $title ) ); ?>">
-								<?php if ( $thumbnail_id ) : ?>
-									<?php echo wp_get_attachment_image( $thumbnail_id, 'large', false, array( 'loading' => 'lazy' ) ); ?>
-								<?php else : ?>
-									<span class="bp-tile__placeholder"><?php echo esc_html( strtoupper( substr( $title, 0, 1 ) ) ); ?></span>
-								<?php endif; ?>
-							</a>
-							<div class="bp-tile__body">
-								<p class="bp-tile__categories"><span class="bp-manage__status bp-manage__status--<?php echo esc_attr( $status ); ?>"><?php echo esc_html( self::status_label( $status ) ); ?></span><?php echo esc_html( $change ? self::proposal_label( $change->ID, $change_type ) : __( 'Published Blueprint', 'blueprint-registry' ) ); ?></p>
-								<h2><a href="<?php echo esc_url( $edit_url ); ?>"><?php echo esc_html( $title ); ?></a></h2>
-								<?php if ( ! empty( $presentation['description'] ) ) : ?>
-									<p class="bp-tile__description"><?php echo esc_html( $presentation['description'] ); ?></p>
-								<?php endif; ?>
-								<div class="bp-tile__footer">
-									<span><?php echo esc_html( get_the_modified_date( '', $modified ) ); ?></span>
-									<div class="bp-manage__tile-actions">
-										<?php if ( $change && 'draft' === $status ) : ?>
-											<form class="bp-manage__inline-form" method="post" action="<?php echo esc_url( self::dashboard_url() ); ?>">
-												<input type="hidden" name="bp_action" value="delete_draft">
-												<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
-												<?php wp_nonce_field( 'bp_front_delete_' . $change->ID ); ?>
-												<button class="bp-manage__link-button" type="submit"><?php esc_html_e( 'Remove', 'blueprint-registry' ); ?></button>
-											</form>
-										<?php endif; ?>
-										<a href="<?php echo esc_url( $edit_url ); ?>"><?php esc_html_e( 'Edit', 'blueprint-registry' ); ?> &rarr;</a>
-									</div>
-								</div>
-							</div>
-						</article>
-					<?php endforeach; ?>
+			<div class="bp-page-head__actions">
+				<a class="bp-btn bp-btn--primary" href="<?php echo esc_url( self::new_editor_url() ); ?>">
+					<?php echo Blueprint_Registry_Ui::icon( 'plus' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+					<?php esc_html_e( 'New Blueprint', 'blueprint-registry' ); ?>
+				</a>
+			</div>
+		</div>
+
+		<?php Blueprint_Registry_Ui::notice(); ?>
+
+		<?php if ( $counts['attention'] ) : ?>
+			<div class="bp-notice bp-notice--warn">
+				<?php echo Blueprint_Registry_Ui::icon( 'alert' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+				<div>
+					<strong><?php echo esc_html( sprintf( _n( 'A reviewer asked for changes on %d proposal.', 'A reviewer asked for changes on %d proposals.', $counts['attention'], 'blueprint-registry' ), $counts['attention'] ) ); ?></strong>
+					<?php esc_html_e( 'Open the feedback to continue.', 'blueprint-registry' ); ?>
 				</div>
+			</div>
+		<?php endif; ?>
+
+		<?php if ( $rows ) : ?>
+			<nav class="bp-segments" aria-label="<?php esc_attr_e( 'Filter by status', 'blueprint-registry' ); ?>">
+				<?php foreach ( $tabs as $key => $label ) : ?>
+					<?php if ( ! $counts[ $key ] && 'all' !== $key ) : ?><?php continue; ?><?php endif; ?>
+					<a
+						href="<?php echo esc_url( self::dashboard_url( 'all' === $key ? array() : array( 'bp_filter' => $key ) ) ); ?>"
+						class="<?php echo 'attention' === $key ? 'is-attention' : ''; ?>"
+						<?php echo $filter === $key ? 'aria-current="page"' : ''; ?>
+					>
+						<?php echo esc_html( $label ); ?>
+						<span class="bp-segments__count"><?php echo esc_html( $counts[ $key ] ); ?></span>
+					</a>
+				<?php endforeach; ?>
+			</nav>
+		<?php endif; ?>
+
+		<div class="bpv">
+			<?php if ( ! $visible ) : ?>
+				<?php
+				Blueprint_Registry_Ui::empty_state(
+					$rows ? 'search' : 'sparkle',
+					$rows ? __( 'Nothing in this view', 'blueprint-registry' ) : __( 'Start your first Blueprint', 'blueprint-registry' ),
+					$rows
+						? __( 'Switch to another status to see the rest of your work.', 'blueprint-registry' )
+						: __( 'Write one from scratch, or open any Blueprint in the gallery and fork it.', 'blueprint-registry' ),
+					sprintf( '<a class="bp-btn" href="%s">%s</a>', esc_url( $rows ? self::dashboard_url() : get_post_type_archive_link( 'blueprint' ) ), $rows ? esc_html__( 'All work', 'blueprint-registry' ) : esc_html__( 'Explore the gallery', 'blueprint-registry' ) )
+				);
+				?>
 			<?php else : ?>
-				<div class="bp-manage__panel bp-manage__empty"><p><?php esc_html_e( 'You have not created a Blueprint yet.', 'blueprint-registry' ); ?></p></div>
+				<div class="bpv__table-wrap">
+					<table class="bpv__table">
+						<thead>
+							<tr>
+								<th><?php esc_html_e( 'Blueprint', 'blueprint-registry' ); ?></th>
+								<th><?php esc_html_e( 'Status', 'blueprint-registry' ); ?></th>
+								<th><?php esc_html_e( 'Kind', 'blueprint-registry' ); ?></th>
+								<th><?php esc_html_e( 'Updated', 'blueprint-registry' ); ?></th>
+								<th><span class="bp-visually-hidden"><?php esc_html_e( 'Actions', 'blueprint-registry' ); ?></span></th>
+							</tr>
+						</thead>
+						<tbody>
+							<?php foreach ( $visible as $row ) : ?>
+								<tr<?php echo $row['blueprint_id'] ? ' data-bp-blueprint-id="' . esc_attr( $row['blueprint_id'] ) . '"' : ''; ?>>
+									<td>
+										<div class="bpv__primary">
+											<span class="bpv__thumb">
+												<?php if ( $row['thumbnail_id'] ) : ?>
+													<?php echo wp_get_attachment_image( $row['thumbnail_id'], 'medium', false, array( 'loading' => 'lazy', 'alt' => '' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+												<?php else : ?>
+													<span class="bpv__thumb-letter"><?php echo esc_html( strtoupper( substr( $row['title'], 0, 1 ) ) ); ?></span>
+												<?php endif; ?>
+											</span>
+											<span class="bpv__primary-text">
+												<a class="bpv__title" href="<?php echo esc_url( $row['edit_url'] ); ?>"><?php echo esc_html( $row['title'] ); ?></a>
+												<?php if ( $row['description'] ) : ?><span class="bpv__subtitle"><?php echo esc_html( $row['description'] ); ?></span><?php endif; ?>
+											</span>
+										</div>
+									</td>
+									<td class="bpv__cell--tight"><?php Blueprint_Registry_Ui::chip( $row['status'], self::status_label( $row['status'] ) ); ?></td>
+									<td class="bpv__cell--tight"><?php echo esc_html( $row['kind'] ); ?></td>
+									<td class="bpv__cell--tight"><?php echo esc_html( $row['modified'] ); ?></td>
+									<td class="bpv__cell--tight">
+										<span class="bp-row-actions">
+											<?php if ( $row['delete_id'] ) : ?>
+												<form class="bp-inline-form" method="post" action="<?php echo esc_url( self::dashboard_url() ); ?>" data-bp-confirm="<?php esc_attr_e( 'Remove this draft? This cannot be undone.', 'blueprint-registry' ); ?>">
+													<input type="hidden" name="bp_action" value="delete_draft">
+													<input type="hidden" name="change_id" value="<?php echo esc_attr( $row['delete_id'] ); ?>">
+													<?php wp_nonce_field( 'bp_front_delete_' . $row['delete_id'] ); ?>
+													<button class="bp-btn bp-btn--sm bp-btn--quiet-danger" type="submit" aria-label="<?php echo esc_attr( sprintf( __( 'Remove %s', 'blueprint-registry' ), $row['title'] ) ); ?>">
+														<?php echo Blueprint_Registry_Ui::icon( 'trash' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+													</button>
+												</form>
+											<?php endif; ?>
+											<?php if ( $row['public_url'] ) : ?>
+												<a class="bp-btn bp-btn--sm bp-btn--ghost" href="<?php echo esc_url( $row['public_url'] ); ?>"><?php esc_html_e( 'Published', 'blueprint-registry' ); ?></a>
+											<?php endif; ?>
+											<a class="bp-btn bp-btn--sm" href="<?php echo esc_url( $row['edit_url'] ); ?>"><?php echo esc_html( $row['action_label'] ); ?></a>
+										</span>
+									</td>
+								</tr>
+							<?php endforeach; ?>
+						</tbody>
+					</table>
+				</div>
+				<div class="bpv__footer">
+					<span><?php echo esc_html( sprintf( _n( '%d item', '%d items', count( $visible ), 'blueprint-registry' ), count( $visible ) ) ); ?></span>
+				</div>
 			<?php endif; ?>
-		</section>
+		</div>
 		<?php
+	}
+
+	/**
+	 * Flattens one dashboard entry into the fields the table renders, and tags
+	 * it with the status buckets it belongs to.
+	 */
+	private static function dashboard_row( array $item ) {
+		$blueprint    = $item['blueprint'];
+		$change       = $item['change'];
+		$blueprint_id = $blueprint ? $blueprint->ID : 0;
+		$status       = $change ? self::change_status( $change->ID ) : 'published';
+		$change_type  = $change ? ( get_post_meta( $change->ID, '_bp_change_type', true ) ?: 'new' ) : '';
+		$presentation = $change
+			? Blueprint_Registry_Workflow::presentation( Blueprint_Registry_Workflow::source( $change->ID ) )
+			: array( 'description' => (string) get_post_field( 'post_content', $blueprint_id ) );
+
+		$buckets = array();
+		if ( 'changes_requested' === $status ) {
+			$buckets[] = 'attention';
+		}
+		if ( 'pending_review' === $status ) {
+			$buckets[] = 'review';
+		}
+		if ( 'draft' === $status ) {
+			$buckets[] = 'draft';
+		}
+		if ( $blueprint_id ) {
+			$buckets[] = 'published';
+		}
+
+		$action_labels = array(
+			'draft'             => __( 'Continue', 'blueprint-registry' ),
+			'changes_requested' => __( 'Address feedback', 'blueprint-registry' ),
+			'pending_review'    => __( 'Edit changes', 'blueprint-registry' ),
+		);
+
+		return array(
+			'blueprint_id' => $blueprint_id,
+			'title'        => $change ? get_the_title( $change ) : get_the_title( $blueprint ),
+			'description'  => wp_trim_words( wp_strip_all_tags( $presentation['description'] ?? '' ), 16 ),
+			'status'       => $status,
+			'kind'         => $change ? array( 'new' => __( 'New Blueprint', 'blueprint-registry' ), 'fork' => __( 'Fork', 'blueprint-registry' ), 'update' => __( 'Update', 'blueprint-registry' ) )[ $change_type ] : __( 'Blueprint', 'blueprint-registry' ),
+			'modified'     => get_the_modified_date( get_option( 'date_format' ), $change ?: $blueprint ),
+			'edit_url'     => $change ? self::edit_url( $change->ID ) : self::new_editor_url( $blueprint_id, 'update' ),
+			'action_label' => $action_labels[ $status ] ?? __( 'Edit', 'blueprint-registry' ),
+			'public_url'   => $blueprint_id ? get_permalink( $blueprint_id ) : '',
+			'delete_id'    => $change && 'draft' === $status ? $change->ID : 0,
+			'thumbnail_id' => $blueprint_id ? get_post_thumbnail_id( $blueprint_id ) : ( $change ? get_post_thumbnail_id( $change->ID ) : 0 ),
+			'buckets'      => $buckets,
+		);
 	}
 
 	private static function dashboard_items( $author_id ) {
@@ -599,54 +916,85 @@ final class Blueprint_Registry_Frontend {
 			wp_die( esc_html__( 'You cannot manage this Blueprint draft.', 'blueprint-registry' ), '', array( 'response' => 403 ) );
 		}
 
-		$status       = self::change_status( $change->ID );
-		$review_messages = Blueprint_Registry_Workflow::review_messages( $change->ID );
-		$errors       = get_post_meta( $change->ID, '_bp_validation_errors', true );
-		$upload_error = get_post_meta( $change->ID, '_bp_upload_error', true );
-		$editable     = in_array( $status, array( 'draft', 'pending_review', 'changes_requested' ), true );
+		$status    = self::change_status( $change->ID );
+		$messages  = Blueprint_Registry_Workflow::review_messages( $change->ID );
+		$errors    = get_post_meta( $change->ID, '_bp_validation_errors', true );
+		$errors    = is_array( $errors ) ? $errors : array();
+		$editable  = in_array( $status, array( 'draft', 'pending_review', 'changes_requested' ), true );
+		$target_id = (int) get_post_meta( $change->ID, '_bp_target_blueprint_id', true );
+		$type      = get_post_meta( $change->ID, '_bp_change_type', true ) ?: 'new';
 		?>
-		<header class="bp-manage__header bp-manage__header--editor">
-			<div>
-				<p><a href="<?php echo esc_url( self::dashboard_url() ); ?>">&larr; <?php esc_html_e( 'My Blueprints', 'blueprint-registry' ); ?></a></p>
+		<a class="bp-back" href="<?php echo esc_url( self::dashboard_url() ); ?>">
+			<?php echo Blueprint_Registry_Ui::icon( 'arrow-left' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+			<?php esc_html_e( 'My work', 'blueprint-registry' ); ?>
+		</a>
+
+		<div class="bp-page-head">
+			<div class="bp-page-head__text">
 				<h1><?php echo esc_html( get_the_title( $change ) ); ?></h1>
-				<p><span class="bp-manage__status bp-manage__status--<?php echo esc_attr( $status ); ?>"><?php echo esc_html( self::status_label( $status ) ); ?></span></p>
+				<div class="bp-page-head__meta">
+					<?php Blueprint_Registry_Ui::chip( $status, self::status_label( $status ) ); ?>
+					<?php if ( $errors ) : ?>
+						<span class="bp-chip bp-chip--rejected"><?php echo esc_html( sprintf( _n( '%d problem to fix', '%d problems to fix', count( $errors ), 'blueprint-registry' ), count( $errors ) ) ); ?></span>
+					<?php endif; ?>
+					<span class="bp-panel__head-note"><?php echo esc_html( self::proposal_label( $change->ID, $type ) ); ?></span>
+					<?php if ( 'pending_review' === $status ) : ?>
+						<span class="bp-panel__head-note"><?php esc_html_e( 'Your submitted version stays in the queue while you edit.', 'blueprint-registry' ); ?></span>
+					<?php endif; ?>
+				</div>
 			</div>
-		</header>
-		<?php self::render_notice(); ?>
-		<?php self::render_review_history( $review_messages ); ?>
-		<?php self::render_revision_history( (int) get_post_meta( $change->ID, '_bp_target_blueprint_id', true ), $change->ID ); ?>
-		<form id="bp-manage-editor" class="bp-manage__editor" method="post" action="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>" enctype="multipart/form-data">
-			<input type="hidden" name="bp_action" value="save">
+			<div class="bp-page-head__actions">
+				<?php if ( $editable ) : ?>
+					<?php self::render_delete_draft_action( $change ); ?>
+					<button class="bp-btn bp-btn--primary" type="submit" form="bp-manage-editor">
+						<?php echo Blueprint_Registry_Ui::icon( 'diff' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+						<?php esc_html_e( 'Review changes', 'blueprint-registry' ); ?>
+					</button>
+				<?php else : ?>
+					<?php self::render_change_actions( $change ); ?>
+				<?php endif; ?>
+			</div>
+		</div>
+
+		<?php $upload_error = get_post_meta( $change->ID, '_bp_upload_error', true ); ?>
+		<?php if ( $upload_error ) : ?>
+			<div class="bp-notice bp-notice--error" role="alert">
+				<?php echo Blueprint_Registry_Ui::icon( 'alert' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+				<div><strong><?php esc_html_e( 'Your code was saved, but the files were not added.', 'blueprint-registry' ); ?></strong> <?php echo esc_html( $upload_error ); ?> <a href="#bp-bundle-panel"><?php esc_html_e( 'Try the upload again', 'blueprint-registry' ); ?></a></div>
+			</div>
+		<?php else : ?>
+			<?php Blueprint_Registry_Ui::notice(); ?>
+		<?php endif; ?>
+
+
+		<?php self::render_review_history( $messages ); ?>
+
+		<form id="bp-manage-editor" class="bp-editor" method="post" action="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>" enctype="multipart/form-data">
+			<input type="hidden" name="bp_action" value="save_and_review">
 			<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
 			<?php wp_nonce_field( 'bp_front_save_' . $change->ID ); ?>
-			<section class="bp-manage__panel">
-				<h2><?php esc_html_e( 'Blueprint JSON', 'blueprint-registry' ); ?></h2>
-				<p><?php esc_html_e( 'Use the official Blueprint schema. Review the diff before submitting; errors block submission.', 'blueprint-registry' ); ?></p>
-				<textarea id="bp_blueprint_json" name="bp_blueprint_json" rows="26" <?php disabled( ! $editable ); ?>><?php echo esc_textarea( Blueprint_Registry_Workflow::source( $change->ID ) ); ?></textarea>
-				<?php self::render_validation_errors( $errors ); ?>
-			</section>
-			<section class="bp-manage__panel">
-				<h2><?php esc_html_e( 'Bundle files', 'blueprint-registry' ); ?></h2>
-				<p><?php esc_html_e( 'Upload one resource at a time. Its bundle path is relative to the ZIP root.', 'blueprint-registry' ); ?></p>
-				<?php if ( $upload_error ) : ?><div class="bp-manage__notice bp-manage__notice--error"><?php echo esc_html( $upload_error ); ?></div><?php endif; ?>
-				<div class="bp-manage__file-fields">
-					<p><label for="bp_bundle_file"><?php esc_html_e( 'File', 'blueprint-registry' ); ?></label><input type="file" id="bp_bundle_file" name="bp_bundle_file" <?php disabled( ! $editable ); ?>></p>
-					<p><label for="bp_bundle_path"><?php esc_html_e( 'Bundle path', 'blueprint-registry' ); ?></label><input type="text" id="bp_bundle_path" name="bp_bundle_path" placeholder="content/demo.xml" <?php disabled( ! $editable ); ?>></p>
-				</div>
-				<?php self::render_change_files( $change->ID, $editable ); ?>
-			</section>
+
+			<div class="bp-editor__aside">
+				<?php self::render_upload_panel( __( 'The path is relative to the bundle root.', 'blueprint-registry' ), $editable, $change->ID ); ?>
+				<?php self::render_revision_history( $target_id, $change->ID ); ?>
+			</div>
+
+			<div class="bp-editor__slot">
+				<section class="bp-panel">
+					<div class="bp-panel__head">
+						<h2><?php esc_html_e( 'blueprint.json', 'blueprint-registry' ); ?></h2>
+						<span class="bp-panel__head-note" data-bp-save-state role="status"><?php echo 'pending_review' === $status ? esc_html__( 'Saved working copy', 'blueprint-registry' ) : ( $editable ? esc_html__( 'Saved. Not submitted yet.', 'blueprint-registry' ) : esc_html__( 'Read-only record', 'blueprint-registry' ) ); ?></span>
+					</div>
+					<div class="bp-panel__body">
+						<label class="bp-visually-hidden" for="bp_blueprint_json"><?php esc_html_e( 'Blueprint JSON', 'blueprint-registry' ); ?></label>
+						<textarea class="bp-input" id="bp_blueprint_json" name="bp_blueprint_json" rows="26" spellcheck="false" <?php disabled( ! $editable ); ?>><?php echo esc_textarea( Blueprint_Registry_Workflow::source( $change->ID ) ); ?></textarea>
+						<?php self::render_validation_errors( $errors ); ?>
+					</div>
+				</section>
+
+			</div>
 		</form>
-		<?php if ( $editable ) : ?>
-			<div class="bp-manage__actions">
-				<?php self::render_delete_draft_action( $change ); ?>
-				<button class="bp-manage__button bp-manage__button--primary" type="submit" form="bp-manage-editor" name="bp_action" value="save_and_review"><?php esc_html_e( 'Review changes', 'blueprint-registry' ); ?></button>
-			</div>
-		<?php endif; ?>
-		<?php if ( ! $editable ) : ?>
-			<div class="bp-manage__actions bp-manage__actions--editor">
-				<?php self::render_change_actions( $change ); ?>
-			</div>
-		<?php endif; ?>
+		<?php self::render_submission_history( $change->ID ); ?>
 		<?php
 	}
 
@@ -661,36 +1009,98 @@ final class Blueprint_Registry_Frontend {
 			wp_safe_redirect( self::edit_url( $change->ID ) );
 			exit;
 		}
+
+		$errors = get_post_meta( $change->ID, '_bp_validation_errors', true );
+		$errors = is_array( $errors ) ? $errors : array();
+		$upload_error = get_post_meta( $change->ID, '_bp_upload_error', true );
+		if ( $upload_error ) { $errors[] = $upload_error; }
 		?>
-		<header class="bp-manage__header bp-manage__header--editor">
-			<div>
-				<p><a href="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>">&larr; <?php esc_html_e( 'Edit Blueprint', 'blueprint-registry' ); ?></a></p>
-				<h1><?php esc_html_e( 'Review changes', 'blueprint-registry' ); ?></h1>
-				<p><?php echo esc_html( get_the_title( $change ) ); ?></p>
+		<a class="bp-back" href="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>">
+			<?php echo Blueprint_Registry_Ui::icon( 'arrow-left' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+			<?php esc_html_e( 'Back to editing', 'blueprint-registry' ); ?>
+		</a>
+
+		<div class="bp-page-head">
+			<div class="bp-page-head__text">
+				<h1><?php esc_html_e( 'Review your changes', 'blueprint-registry' ); ?></h1>
+				<p class="bp-page-head__sub">
+					<?php
+					echo esc_html(
+						$errors
+							? __( 'Fix the problems below before submitting.', 'blueprint-registry' )
+							/* translators: %s: the Blueprint title. */
+							: sprintf( __( 'Check %s below. A reviewer must accept it before it appears in the gallery.', 'blueprint-registry' ), get_the_title( $change ) )
+					);
+					?>
+				</p>
 			</div>
-		</header>
-		<?php self::render_notice(); ?>
-		<?php self::render_review_history( Blueprint_Registry_Workflow::review_messages( $change->ID ) ); ?>
-		<section class="bp-manage__panel bp-manage__diff">
-			<?php Blueprint_Registry_Diff::render_change( $change->ID, __( 'Changes from the base release', 'blueprint-registry' ) ); ?>
-		</section>
-		<div class="bp-manage__actions bp-manage__actions--editor">
-			<?php self::render_delete_draft_action( $change ); ?>
-			<a class="bp-manage__button" href="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>"><?php esc_html_e( 'Back to editing', 'blueprint-registry' ); ?></a>
-			<form class="bp-manage__inline-form" method="post" action="<?php echo esc_url( self::submission_review_url( $change->ID ) ); ?>" target="bp-playground">
-				<input type="hidden" name="bp_action" value="preview">
-				<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
-				<?php wp_nonce_field( 'bp_front_preview_' . $change->ID ); ?>
-				<button class="bp-manage__button" type="submit"><?php esc_html_e( 'Preview', 'blueprint-registry' ); ?></button>
-			</form>
-			<form class="bp-manage__inline-form" method="post" action="<?php echo esc_url( self::submission_review_url( $change->ID ) ); ?>">
-				<input type="hidden" name="bp_action" value="submit">
-				<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
-				<?php wp_nonce_field( 'bp_front_submit_' . $change->ID ); ?>
-				<button class="bp-manage__button bp-manage__button--primary" type="submit"><?php esc_html_e( 'Submit changes for review', 'blueprint-registry' ); ?></button>
-			</form>
+			<div class="bp-page-head__actions">
+				<form class="bp-inline-form" method="post" action="<?php echo esc_url( self::submission_review_url( $change->ID ) ); ?>" target="bp-playground">
+					<input type="hidden" name="bp_action" value="preview">
+					<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
+					<input type="hidden" name="bp_reviewed_content" value="<?php echo esc_attr( self::review_fingerprint( $change->ID ) ); ?>">
+					<?php wp_nonce_field( 'bp_front_preview_' . $change->ID ); ?>
+					<button class="bp-btn" type="submit">
+						<?php echo Blueprint_Registry_Ui::icon( 'play' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+						<?php esc_html_e( 'Run preview ↗', 'blueprint-registry' ); ?>
+					</button>
+				</form>
+				<form class="bp-inline-form" method="post" action="<?php echo esc_url( self::submission_review_url( $change->ID ) ); ?>">
+					<input type="hidden" name="bp_action" value="submit">
+					<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
+					<input type="hidden" name="bp_reviewed_content" value="<?php echo esc_attr( self::review_fingerprint( $change->ID ) ); ?>">
+					<?php wp_nonce_field( 'bp_front_submit_' . $change->ID ); ?>
+					<button class="bp-btn bp-btn--primary" type="submit" <?php disabled( (bool) $errors ); ?>>
+						<?php echo Blueprint_Registry_Ui::icon( 'send' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+						<?php echo 'pending_review' === $status ? esc_html__( 'Replace submitted version', 'blueprint-registry' ) : esc_html__( 'Submit for review', 'blueprint-registry' ); ?>
+					</button>
+				</form>
+			</div>
 		</div>
+
+		<?php Blueprint_Registry_Ui::notice(); ?>
+		<?php self::render_validation_errors( $errors ); ?>
+		<?php $presentation = Blueprint_Registry_Workflow::presentation( Blueprint_Registry_Workflow::source( $change->ID ) ); ?>
+		<section class="bp-panel bp-review-intro">
+			<div class="bp-panel__body">
+				<h2><?php echo esc_html( get_the_title( $change ) ); ?></h2>
+				<?php if ( ! empty( $presentation['description'] ) ) : ?><p><?php echo esc_html( $presentation['description'] ); ?></p><?php endif; ?>
+				<p class="bp-field__hint"><?php esc_html_e( 'Run preview opens this saved bundle in a new Playground tab. Nothing is published yet.', 'blueprint-registry' ); ?></p>
+				<?php if ( 'pending_review' === $status ) : ?><p class="bp-field__hint"><?php esc_html_e( 'Submitting replaces the version in the queue with the contents below.', 'blueprint-registry' ); ?></p><?php endif; ?>
+			</div>
+		</section>
+
 		<?php
+		$target_id = (int) get_post_meta( $change->ID, '_bp_target_blueprint_id', true );
+		$current_id = $target_id ? (int) get_post_meta( $target_id, '_bp_current_release_id', true ) : 0;
+		$base_id = (int) get_post_meta( $change->ID, '_bp_base_release_id', true );
+		?>
+		<?php if ( 'changes_requested' === $status && $current_id && $base_id !== $current_id ) : ?>
+			<form class="bp-notice bp-notice--warn" method="post" action="<?php echo esc_url( self::submission_review_url( $change->ID ) ); ?>">
+				<input type="hidden" name="bp_action" value="refresh_base">
+				<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
+				<?php wp_nonce_field( 'bp_front_refresh_base_' . $change->ID ); ?>
+				<div><?php esc_html_e( 'A newer revision has been published. Compare your changes with it before submitting again.', 'blueprint-registry' ); ?></div>
+				<button class="bp-btn" type="submit"><?php esc_html_e( 'Compare with current revision', 'blueprint-registry' ); ?></button>
+			</form>
+		<?php endif; ?>
+
+		<?php Blueprint_Registry_Diff::render_change( $change->ID, __( 'Changes from the base revision', 'blueprint-registry' ) ); ?>
+		<?php if ( $base_id && Blueprint_Registry_Bundles::get_change_files( $change->ID ) ) : ?>
+			<details class="bp-panel bp-submitted-history">
+				<summary class="bp-history-toggle"><?php esc_html_e( 'All bundle files', 'blueprint-registry' ); ?></summary>
+				<?php self::render_change_files( $change->ID, false ); ?>
+			</details>
+		<?php endif; ?>
+
+		<?php
+	}
+
+	private static function review_fingerprint( $change_id ) {
+		return hash( 'sha256', wp_json_encode( array(
+			'base' => (int) get_post_meta( $change_id, '_bp_base_release_id', true ),
+			'files' => Blueprint_Registry_Bundles::release_manifest( Blueprint_Registry_Workflow::source( $change_id ), Blueprint_Registry_Bundles::get_change_files( $change_id ) ),
+		) ) );
 	}
 
 	private static function render_delete_draft_action( $change ) {
@@ -698,37 +1108,40 @@ final class Blueprint_Registry_Frontend {
 			return;
 		}
 		?>
-		<form class="bp-manage__inline-form" method="post" action="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>">
+		<form class="bp-inline-form" method="post" action="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>" data-bp-confirm="<?php esc_attr_e( 'Remove this draft? This cannot be undone.', 'blueprint-registry' ); ?>">
 			<input type="hidden" name="bp_action" value="delete_draft">
 			<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
 			<?php wp_nonce_field( 'bp_front_delete_' . $change->ID ); ?>
-			<button class="bp-manage__button bp-manage__button--danger" type="submit"><?php esc_html_e( 'Remove', 'blueprint-registry' ); ?></button>
+			<button class="bp-btn bp-btn--quiet-danger" type="submit">
+				<?php echo Blueprint_Registry_Ui::icon( 'trash' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+				<?php esc_html_e( 'Remove draft', 'blueprint-registry' ); ?>
+			</button>
 		</form>
 		<?php
 	}
 
+	/**
+	 * Actions for a proposal that can no longer be edited.
+	 */
 	private static function render_change_actions( $change ) {
-		$status = self::change_status( $change->ID );
-		$target_id = (int) get_post_meta( $change->ID, '_bp_target_blueprint_id', true );
-		$base_id   = (int) get_post_meta( $change->ID, '_bp_base_release_id', true );
-		$current_id = $target_id ? (int) get_post_meta( $target_id, '_bp_current_release_id', true ) : 0;
+		$status     = self::change_status( $change->ID );
+		$target_id  = (int) get_post_meta( $change->ID, '_bp_target_blueprint_id', true );
 		?>
-		<form class="bp-manage__inline-form" method="post" action="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>" target="bp-playground">
+		<form class="bp-inline-form" method="post" action="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>" target="bp-playground">
 			<input type="hidden" name="bp_action" value="preview">
 			<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
 			<?php wp_nonce_field( 'bp_front_preview_' . $change->ID ); ?>
-			<button class="bp-manage__button" type="submit"><?php esc_html_e( 'Preview', 'blueprint-registry' ); ?></button>
+			<button class="bp-btn" type="submit">
+				<?php echo Blueprint_Registry_Ui::icon( 'play' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+				<?php esc_html_e( 'Run preview ↗', 'blueprint-registry' ); ?>
+			</button>
 		</form>
-		<?php if ( 'changes_requested' === $status && $target_id && $current_id && $current_id !== $base_id ) : ?>
-			<form class="bp-manage__inline-form" method="post" action="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>">
-				<input type="hidden" name="bp_action" value="refresh_base">
-				<input type="hidden" name="change_id" value="<?php echo esc_attr( $change->ID ); ?>">
-				<?php wp_nonce_field( 'bp_front_refresh_base_' . $change->ID ); ?>
-				<button class="bp-manage__button" type="submit"><?php esc_html_e( 'Compare with current release', 'blueprint-registry' ); ?></button>
-			</form>
-		<?php endif; ?>
+
 		<?php if ( in_array( $status, array( 'accepted', 'rejected' ), true ) && $target_id ) : ?>
-			<a class="bp-manage__button bp-manage__button--primary" href="<?php echo esc_url( self::new_editor_url( $target_id, 'update' ) ); ?>"><?php esc_html_e( 'Edit this Blueprint', 'blueprint-registry' ); ?></a>
+			<a class="bp-btn bp-btn--primary" href="<?php echo esc_url( self::new_editor_url( $target_id, 'update' ) ); ?>">
+				<?php echo Blueprint_Registry_Ui::icon( 'edit' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+				<?php esc_html_e( 'Start a new update', 'blueprint-registry' ); ?>
+			</a>
 		<?php endif; ?>
 		<?php
 	}
@@ -739,20 +1152,22 @@ final class Blueprint_Registry_Frontend {
 			return;
 		}
 		?>
-		<table class="bp-manage__files">
-			<thead><tr><th><?php esc_html_e( 'Path', 'blueprint-registry' ); ?></th><th><?php esc_html_e( 'File', 'blueprint-registry' ); ?></th><th><?php esc_html_e( 'Download', 'blueprint-registry' ); ?></th><?php if ( $editable ) : ?><th><span class="screen-reader-text"><?php esc_html_e( 'Remove', 'blueprint-registry' ); ?></span></th><?php endif; ?></tr></thead>
-			<tbody>
-				<?php foreach ( $files as $file ) : ?>
-					<?php $read_url = Blueprint_Registry_Admin::bundle_file_url( $change_id, $file['attachment_id'] ); $download_url = Blueprint_Registry_Admin::bundle_file_url( $change_id, $file['attachment_id'], true ); ?>
-					<tr>
-						<td><a href="<?php echo esc_url( $read_url ); ?>"><code><?php echo esc_html( $file['path'] ); ?></code></a></td>
-						<td><a href="<?php echo esc_url( $read_url ); ?>"><?php echo esc_html( get_the_title( $file['attachment_id'] ) ); ?></a></td>
-						<td><a href="<?php echo esc_url( $download_url ); ?>"><?php esc_html_e( 'Download', 'blueprint-registry' ); ?></a></td>
-						<?php if ( $editable ) : ?><td><button class="bp-manage__link-button" type="submit" name="bp_remove_file" value="<?php echo esc_attr( $file['attachment_id'] ); ?>"><?php esc_html_e( 'Remove', 'blueprint-registry' ); ?></button></td><?php endif; ?>
-					</tr>
-				<?php endforeach; ?>
-			</tbody>
-		</table>
+		<ul class="bp-bundle-list">
+			<?php foreach ( $files as $file ) : ?>
+				<li>
+					<?php echo Blueprint_Registry_Ui::icon( Blueprint_Registry_Ui::file_icon( $file['path'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+					<a class="bp-bundle-list__name" href="<?php echo esc_url( Blueprint_Registry_Admin::bundle_file_url( $change_id, $file['key'] ) ); ?>" title="<?php echo esc_attr( $file['path'] ); ?>"><?php echo esc_html( $file['path'] ); ?></a>
+					<?php if ( $editable ) : ?>
+						<button class="bp-bundle-list__remove" type="submit" name="bp_remove_file" value="<?php echo esc_attr( $file['key'] ); ?>" aria-label="<?php echo esc_attr( sprintf( __( 'Remove %s', 'blueprint-registry' ), $file['path'] ) ); ?>">
+							<?php echo Blueprint_Registry_Ui::icon( 'trash' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+						</button>
+					<?php endif; ?>
+					<a class="bp-bundle-list__remove" href="<?php echo esc_url( Blueprint_Registry_Admin::bundle_file_url( $change_id, $file['key'], true ) ); ?>" aria-label="<?php echo esc_attr( sprintf( __( 'Download %s', 'blueprint-registry' ), $file['path'] ) ); ?>">
+						<?php echo Blueprint_Registry_Ui::icon( 'download' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+					</a>
+				</li>
+			<?php endforeach; ?>
+		</ul>
 		<?php
 	}
 
@@ -761,24 +1176,83 @@ final class Blueprint_Registry_Frontend {
 			return;
 		}
 		?>
-		<div class="bp-manage__notice bp-manage__notice--error"><strong><?php esc_html_e( 'Validation', 'blueprint-registry' ); ?></strong><ul><?php foreach ( $errors as $error ) : ?><li><?php echo esc_html( $error ); ?></li><?php endforeach; ?></ul></div>
+		<div class="bp-notice bp-notice--error" style="margin-top:1rem">
+			<?php echo Blueprint_Registry_Ui::icon( 'alert' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+			<div>
+				<strong><?php echo esc_html( sprintf( _n( '%d problem to fix', '%d problems to fix', count( $errors ), 'blueprint-registry' ), count( $errors ) ) ); ?></strong>
+				<ul><?php foreach ( $errors as $error ) : ?><li><?php echo esc_html( $error ); ?></li><?php endforeach; ?></ul>
+			</div>
+		</div>
 		<?php
 	}
 
+	/**
+	 * The latest reviewer feedback stays visible; earlier decisions are optional.
+	 */
 	private static function render_review_history( $messages ) {
 		if ( ! $messages ) {
 			return;
 		}
 		?>
-		<section class="bp-manage__panel">
-			<h2><?php esc_html_e( 'Review history', 'blueprint-registry' ); ?></h2>
-			<ul class="bp-manage__review-history">
-				<?php foreach ( $messages as $message ) : ?>
-					<?php $decision = get_comment_meta( $message->comment_ID, '_bp_review_decision', true ); $submission_id = (int) get_comment_meta( $message->comment_ID, '_bp_submission_id', true ); $submission_number = (int) get_post_meta( $submission_id, '_bp_submission_number', true ); ?>
-					<li><strong><?php echo esc_html( self::status_label( $decision ) ); ?></strong><?php if ( $submission_number ) : ?> <span><?php echo esc_html( sprintf( __( 'Version %d', 'blueprint-registry' ), $submission_number ) ); ?></span><?php endif; ?> <?php echo esc_html( sprintf( __( 'by %1$s on %2$s', 'blueprint-registry' ), $message->comment_author, get_comment_date( '', $message ) ) ); ?><?php if ( $message->comment_content ) : ?><br><?php echo nl2br( esc_html( $message->comment_content ) ); ?><?php endif; ?></li>
+		<section class="bp-panel bp-feedback">
+			<div class="bp-panel__head">
+				<h2><?php esc_html_e( 'Reviewer feedback', 'blueprint-registry' ); ?></h2>
+				<span class="bp-panel__head-note"><?php echo esc_html( sprintf( _n( '%d decision', '%d decisions', count( $messages ), 'blueprint-registry' ), count( $messages ) ) ); ?></span>
+			</div>
+			<ul class="bp-thread">
+				<?php foreach ( array_reverse( $messages ) as $index => $message ) : ?>
+					<?php if ( 1 === $index ) : ?></ul><details><summary class="bp-history-toggle"><?php esc_html_e( 'Earlier feedback', 'blueprint-registry' ); ?></summary><ul class="bp-thread"><?php endif; ?>
+					<?php
+					$decision = get_comment_meta( $message->comment_ID, '_bp_review_decision', true );
+					$version  = (int) get_post_meta( (int) get_comment_meta( $message->comment_ID, '_bp_submission_id', true ), '_bp_submission_number', true );
+					$icon     = 'approved' === $decision ? 'check' : ( 'rejected' === $decision ? 'close' : 'alert' );
+					?>
+					<li>
+						<span class="bp-thread__icon bp-thread__icon--<?php echo esc_attr( $decision ); ?>"><?php echo Blueprint_Registry_Ui::icon( $icon ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></span>
+						<div class="bp-thread__body">
+							<div class="bp-thread__head">
+								<strong><?php echo esc_html( $message->comment_author ); ?></strong>
+								<span><?php echo esc_html( self::status_label( $decision ) ); ?></span>
+								<?php if ( $version ) : ?><span><?php echo esc_html( sprintf( __( 'submission %d', 'blueprint-registry' ), $version ) ); ?></span><?php endif; ?>
+								<span class="bp-detail__dot">&middot;</span>
+								<span><?php echo esc_html( get_comment_date( get_option( 'date_format' ), $message ) ); ?></span>
+							</div>
+							<?php if ( $message->comment_content ) : ?>
+								<p class="bp-thread__message"><?php echo esc_html( $message->comment_content ); ?></p>
+							<?php endif; ?>
+						</div>
+					</li>
 				<?php endforeach; ?>
 			</ul>
+			<?php if ( count( $messages ) > 1 ) : ?></details><?php endif; ?>
 		</section>
+		<?php
+	}
+
+	private static function render_submission_history( $change_id ) {
+		$submissions = get_posts( array(
+			'post_type' => 'blueprint_submission',
+			'post_status' => 'private',
+			'post_parent' => $change_id,
+			'posts_per_page' => -1,
+			'orderby' => 'ID',
+			'order' => 'DESC',
+		) );
+		if ( ! $submissions ) {
+			return;
+		}
+		?>
+		<details class="bp-panel bp-submitted-history">
+			<summary class="bp-history-toggle"><?php esc_html_e( 'Submitted versions', 'blueprint-registry' ); ?> <span class="bp-panel__head-note"><?php echo esc_html( count( $submissions ) ); ?></span></summary>
+			<?php foreach ( $submissions as $submission ) : ?>
+				<details class="bp-submitted-version">
+					<summary class="bp-history-toggle">
+						<?php echo esc_html( sprintf( __( 'Submission %1$d · %2$s · %3$s', 'blueprint-registry' ), (int) get_post_meta( $submission->ID, '_bp_submission_number', true ), self::status_label( get_post_meta( $submission->ID, '_bp_status', true ) ), get_the_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $submission ) ) ); ?>
+					</summary>
+					<?php Blueprint_Registry_Diff::render_submission( $submission->ID, __( 'Submitted changes', 'blueprint-registry' ) ); ?>
+				</details>
+			<?php endforeach; ?>
+		</details>
 		<?php
 	}
 
@@ -815,42 +1289,36 @@ final class Blueprint_Registry_Frontend {
 				}
 			)
 		);
-		$summary = array();
-		if ( $current_number ) {
-			$summary[] = sprintf( __( 'Published release %d', 'blueprint-registry' ), $current_number );
-		}
-		if ( $changes ) {
-			$summary[] = sprintf( _n( '%d earlier proposal', '%d earlier proposals', count( $changes ), 'blueprint-registry' ), count( $changes ) );
-		}
-		?>
-		<details class="bp-manage__history">
-			<summary><span><?php esc_html_e( 'Revision history', 'blueprint-registry' ); ?></span><?php if ( $summary ) : ?><span class="bp-manage__history-summary"><?php echo esc_html( implode( ' · ', $summary ) ); ?></span><?php endif; ?></summary>
-			<div class="bp-manage__history-content">
-				<?php if ( $current_number ) : ?>
-					<p class="bp-manage__history-heading"><?php esc_html_e( 'Published version', 'blueprint-registry' ); ?></p>
-					<p><a href="<?php echo esc_url( Blueprint_Registry_Routes::release_detail_url( $blueprint_id, $current_number ) ); ?>"><?php echo esc_html( sprintf( __( 'Release %d', 'blueprint-registry' ), $current_number ) ); ?></a> <span aria-hidden="true">·</span> <a href="<?php echo esc_url( get_permalink( $blueprint_id ) ); ?>"><?php esc_html_e( 'View published Blueprint', 'blueprint-registry' ); ?></a></p>
-				<?php endif; ?>
-				<?php if ( $changes ) : ?>
-					<p class="bp-manage__history-heading"><?php esc_html_e( 'Earlier proposals', 'blueprint-registry' ); ?></p>
-					<ol class="bp-manage__history-list">
-						<?php foreach ( $changes as $change ) : ?>
-							<?php $status = self::change_status( $change->ID ); ?>
-							<li><span class="bp-manage__status bp-manage__status--<?php echo esc_attr( $status ); ?>"><?php echo esc_html( self::status_label( $status ) ); ?></span><a href="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>"><?php echo esc_html( get_the_modified_date( get_option( 'date_format' ), $change ) ); ?></a></li>
-						<?php endforeach; ?>
-					</ol>
-				<?php endif; ?>
-			</div>
-		</details>
-		<?php
-	}
 
-	private static function render_notice() {
-		if ( empty( $_GET['bp_notice'] ) || empty( $_GET['bp_message'] ) ) {
+		if ( ! $current_number && ! $changes ) {
 			return;
 		}
-		$class = 'error' === sanitize_key( wp_unslash( $_GET['bp_notice'] ) ) ? 'error' : 'success';
 		?>
-		<div class="bp-manage__notice bp-manage__notice--<?php echo esc_attr( $class ); ?>"><?php echo esc_html( sanitize_text_field( wp_unslash( $_GET['bp_message'] ) ) ); ?></div>
+		<section class="bp-panel">
+			<div class="bp-panel__head"><h2><?php esc_html_e( 'History', 'blueprint-registry' ); ?></h2></div>
+			<?php if ( $current_number ) : ?>
+				<ul class="bp-bundle-list">
+					<li>
+						<a class="bp-bundle-list__name" href="<?php echo esc_url( Blueprint_Registry_Routes::release_detail_url( $blueprint_id, $current_number ) ); ?>"><?php echo esc_html( sprintf( __( 'Revision %d, current', 'blueprint-registry' ), $current_number ) ); ?></a>
+					</li>
+				</ul>
+			<?php endif; ?>
+			<?php if ( $changes ) : ?>
+				<div class="bp-panel__head" style="border-top:1px solid var(--bp-line)">
+					<h3><?php esc_html_e( 'Earlier proposals', 'blueprint-registry' ); ?></h3>
+					<span class="bp-panel__head-note"><?php echo esc_html( count( $changes ) ); ?></span>
+				</div>
+				<ul class="bp-bundle-list">
+					<?php foreach ( array_slice( $changes, 0, 6 ) as $change ) : ?>
+						<?php $change_status = self::change_status( $change->ID ); ?>
+						<li>
+							<?php Blueprint_Registry_Ui::chip( $change_status, self::status_label( $change_status ) ); ?>
+							<a class="bp-bundle-list__name" href="<?php echo esc_url( self::edit_url( $change->ID ) ); ?>"><?php echo esc_html( get_the_modified_date( get_option( 'date_format' ), $change ) ); ?></a>
+						</li>
+					<?php endforeach; ?>
+				</ul>
+			<?php endif; ?>
+		</section>
 		<?php
 	}
 
@@ -865,12 +1333,13 @@ final class Blueprint_Registry_Frontend {
 	private static function status_label( $status ) {
 		$labels = array(
 			'draft'             => __( 'Draft', 'blueprint-registry' ),
-			'pending_review'    => __( 'Pending review', 'blueprint-registry' ),
+			'pending_review'    => __( 'In review', 'blueprint-registry' ),
 			'changes_requested' => __( 'Changes requested', 'blueprint-registry' ),
 			'approved'          => __( 'Accepted', 'blueprint-registry' ),
 			'accepted'          => __( 'Accepted', 'blueprint-registry' ),
 			'rejected'          => __( 'Rejected', 'blueprint-registry' ),
 			'published'         => __( 'Published', 'blueprint-registry' ),
+			'superseded'        => __( 'Replaced', 'blueprint-registry' ),
 		);
 
 		return $labels[ $status ] ?? ucwords( str_replace( '_', ' ', $status ) );

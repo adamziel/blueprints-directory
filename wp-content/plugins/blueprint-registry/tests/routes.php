@@ -28,10 +28,15 @@ try {
 	$assert( str_starts_with( Blueprint_Registry_Admin::review_queue_url(), admin_url( 'admin.php?page=blueprint-review-queue' ) ), 'Reviewers must use the wp-admin review queue.' );
 	$archive_template = (string) file_get_contents( BLUEPRINT_REGISTRY_DIR . 'templates/archive-blueprint.php' );
 	$single_template  = (string) file_get_contents( BLUEPRINT_REGISTRY_DIR . 'templates/single-blueprint.php' );
-	$assert( str_contains( $archive_template, 'bp-tile__button' ) && str_contains( $archive_template, "'Details'" ) && str_contains( $archive_template, "'Run'" ), 'Public gallery tiles must expose separate Details and Run actions.' );
-	$assert( str_contains( $single_template, 'bp-blueprint__thumbnail' ) && str_contains( $single_template, 'bp-blueprint__file-actions' ), 'Blueprint detail pages must show the thumbnail and aligned file actions.' );
+	$assert( str_contains( $archive_template, 'Propose a new Blueprint' ) && str_contains( $archive_template, 'Blueprint_Registry_Frontend::new_editor_url' ), 'The gallery must offer a direct route into the new Blueprint contribution flow.' );
+	$assert( str_contains( $archive_template, "'Details'" ) && str_contains( $archive_template, "'Run'" ), 'Public gallery entries must expose separate Details and Run actions.' );
+	$assert( ! str_contains( $archive_template, 'bpv__card-media" href' ), 'A gallery card must not repeat its link on the thumbnail; the title link covers the card.' );
+	$assert( str_contains( $archive_template, 'bpv__grid' ) && str_contains( $archive_template, 'bpv__table' ), 'The gallery must offer both a grid and a table layout.' );
+	$assert( str_contains( $archive_template, 'bp_q' ) && str_contains( $archive_template, 'bp_category' ), 'The gallery must be searchable and filterable by category.' );
+	$assert( str_contains( $single_template, 'bp-detail__preview' ) && str_contains( $single_template, 'bp-row-actions' ), 'Blueprint detail pages must show the preview and aligned file actions.' );
 	$assert( str_contains( $single_template, "'Download'" ) && ! str_contains( $single_template, 'Download bundle' ), 'Blueprint pages must label the bundle download action simply Download.' );
-	$assert( str_contains( $single_template, "'Edit'" ) && str_contains( $single_template, '$can_edit' ), 'Blueprint pages must show Edit only for the Blueprint author.' );
+	$assert( str_contains( $single_template, "'Edit'" ) && str_contains( $single_template, '$can_edit' ), 'Blueprint pages must offer Edit only to those allowed to edit.' );
+	$assert( str_starts_with( Blueprint_Registry_Admin::review_url( 123 ), admin_url( 'edit.php?post_type=blueprint' ) ), 'Reviewers must reach a proposal through the dedicated review screen.' );
 	$change = Blueprint_Registry_Workflow::create_change( array( 'title' => 'Route test ' . wp_generate_password( 8, false ), 'author_id' => 1 ) );
 	$posts[] = $change;
 	$assert( true === Blueprint_Registry_Workflow::submit( $change, 1 ), 'The route test change must submit.' );
@@ -80,6 +85,24 @@ try {
 		$_REQUEST = $previous_request;
 	}
 	$assert( str_contains( $redirect, 'bp_notice=error' ), 'A contributor who did not create the Blueprint must not start an edit proposal.' );
+
+	// A reviewer may edit any Blueprint; an ordinary contributor may only edit
+	// their own, and sees nothing on someone else's.
+	$assert( ! Blueprint_Registry_Capabilities::can_edit_blueprint( $blueprint ), 'A contributor must not be offered Edit on a Blueprint they did not create.' );
+	wp_set_current_user( 1 );
+	$assert( Blueprint_Registry_Capabilities::can_edit_blueprint( $blueprint ), 'The Blueprint author must be offered Edit.' );
+	$reviewer = wp_insert_user(
+		array(
+			'user_login' => 'route-reviewer-' . wp_generate_password( 8, false ),
+			'user_pass'  => 'password',
+			'user_email' => wp_generate_password( 8, false ) . '@example.test',
+			'role'       => 'administrator',
+		)
+	);
+	$assert( ! is_wp_error( $reviewer ), 'The reviewer must be created.' );
+	$users[] = $reviewer;
+	wp_set_current_user( $reviewer );
+	$assert( Blueprint_Registry_Capabilities::can_edit_blueprint( $blueprint ), 'A reviewer must be offered Edit on any Blueprint.' );
 	wp_set_current_user( 1 );
 
 	do_action( 'rest_api_init' );
